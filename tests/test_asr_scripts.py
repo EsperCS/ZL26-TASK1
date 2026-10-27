@@ -4,14 +4,13 @@ tests/test_asr_scripts.py
 Unit tests cho module và script ASR (Task 1 - LIFEMATE).
 """
 
-from pathlib import Path
-from scripts.benchmark_asr import normalize_vietnamese_text
 from scripts.setup_asr_models import (
+    MAX_LLM_BUDGET,
+    MAX_TOTAL_BUDGET,
     PHOASR_SMALL_PARAMS,
     PHOWHISPER_LARGE_PARAMS,
-    MAX_TOTAL_BUDGET,
-    MAX_LLM_BUDGET,
 )
+from src.eval.asr_metrics import normalize_text_for_acoustic_eval as normalize_vietnamese_text
 
 
 def test_normalize_vietnamese_text():

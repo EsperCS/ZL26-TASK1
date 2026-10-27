@@ -2,24 +2,32 @@
 """
 scripts/benchmark_asr.py
 
-Thực nghiệm so sánh 2 mô hình ASR cho Task 1 (Zalo AI Challenge 2026):
-- PhoASR-whisper-small-ct2 (0.24B tham số)
-- PhoWhisper-large-ct2 (1.54B tham số)
+Thực nghiệm đánh giá chuẩn chỉnh hệ thống ASR 4 tầng trên 500 mẫu đầu tiên của dataset:
+So sánh 2 mô hình Transducer:
+1. g-group-ai-lab/gipformer1.5-68M-rnnt (~68M params)
+2. hynt/ZipFormer-150M-CR-CTC-RNNT-6000h (~153M params)
 
-Cấu hình:
-- faster_whisper.WhisperModel
-- vad_filter=True (Silero VAD)
-- beam_size=5, temperature=0.0, language='vi'
-- without_timestamps=True (chỉ cần pure text, tối ưu tốc độ)
+Cả 2 mô hình đều trải qua trọn vẹn 4 tầng:
+- Tầng 1: Peak Normalization [-0.95, 0.95] + Silero VAD (min_silence_duration=0.4s)
+- Tầng 2: Sherpa-ONNX Transducer Recognizer (modified_beam_search, max_active_paths=4)
+- Tầng 3: XLM-RoBERTa Punctuation & Capitalization Restoration (dragonSwing/xlm-roberta-capu)
+- Tầng 4: Vietnamese ITN (chuyển đổi số nói -> số viết cho ngày giờ, tiền tệ, tầng, số lượng)
 
-Tiêu chí đánh giá:
-1. Raw WER & CER: So sánh trực tiếp với audio_text gốc (giữ nguyên hoa/thường, dấu câu).
-2. Normalized WER & CER: Sau khi lowercase, chuẩn hóa NFC, loại bỏ dấu câu.
-3. Tốc độ trung bình (ms/sample) & Peak VRAM / RAM.
-4. Xuất file logs/asr_comparison_diff.md chứa 30 mẫu có chênh lệch WER lớn nhất.
+6 Tiêu chuẩn định lượng (Corpus-level):
+1. Normalized WER & CER (%)
+2. Raw WER & CER (%)
+3. Exact Sentence Match (%) [Normalized & Raw]
+4. Number/Digit Recall (%)
+5. Capitalized Entity Recall (%)
+6. Latency (ms/sample) & RTF (Real-Time Factor)
 
-Hỗ trợ chạy trên Google Colab qua lệnh:
-    !python scripts/benchmark_asr.py --train-jsonl data/train/train.jsonl --audio-root data/train --limit 200
+Xuất kết quả:
+- logs/asr_benchmark_500_summary.md
+- logs/asr_benchmark_500_details.parquet
+- logs/asr_500_error_analysis.md (50 mẫu có sai số lớn nhất hoặc lệch nhau)
+
+Chạy lệnh:
+    python scripts/benchmark_asr.py --train-jsonl train/train.jsonl --audio-root train --limit 500
 """
 
 from __future__ import annotations
@@ -27,11 +35,8 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
-import os
-import re
 import sys
 import time
-import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -43,479 +48,346 @@ if sys.stderr.encoding and sys.stderr.encoding.lower() != "utf-8":
     with contextlib.suppress(Exception):
         sys.stderr.reconfigure(encoding="utf-8")
 
-# Tự động phát hiện và cài đặt các thư viện phụ thuộc nếu còn thiếu trong môi trường Python
-def _ensure_dependencies() -> None:
-    import subprocess
-    required = {
-        "faster_whisper": "faster-whisper",
-        "ctranslate2": "ctranslate2",
-        "jiwer": "jiwer",
-        "torch": "torch",
-        "psutil": "psutil",
-    }
-    missing = []
-    for mod, pkg in required.items():
-        try:
-            __import__(mod)
-        except ImportError:
-            missing.append(pkg)
-    if missing:
-        print(f"[TỰ ĐỘNG CÀI ĐẶT] Thiếu thư viện trong {sys.executable}. Đang cài đặt: {missing}...")
-        try:
-            subprocess.run([sys.executable, "-m", "pip", "install", "-U"] + missing, check=True)
-        except (subprocess.SubprocessError, OSError):
-            with contextlib.suppress(Exception):
-                subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "-U", "--break-system-packages"] + missing,
-                    check=True,
-                )
-
-_ensure_dependencies()
-
-# Khắc phục tương thích PyAV 19 (bỏ metadata_errors)
-with contextlib.suppress(Exception):
-    import av
-    _orig_av_open = av.open
-
-    def _safe_av_open(*args: Any, **kwargs: Any) -> Any:
-        kwargs.pop("metadata_errors", None)
-        return _orig_av_open(*args, **kwargs)
-
-    av.open = _safe_av_open
-
-import faster_whisper
 import jiwer
+import pandas as pd
 import torch
+from tqdm import tqdm
+
+# Thêm thư mục gốc vào sys.path để import từ src
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from src.asr.sherpa_xlm_pipeline import SherpaXLMPipeline
+from src.eval.asr_metrics import (
+    ASRCorpusMetrics,
+    compute_corpus_metrics,
+    normalize_text_for_acoustic_eval,
+)
 
 
-def setup_cuda_libraries() -> None:
-    """Tìm và nạp sẵn các thư viện CUDA (libcublas.so.12, libcudnn) vào bộ nhớ tiến trình."""
-    if not sys.platform.startswith("linux"):
-        return
-
-    import ctypes
-    import glob
-
-    candidate_dirs = [
-        "/usr/local/cuda/lib64",
-        "/usr/local/cuda-12/lib64",
-        "/usr/local/cuda-12.0/lib64",
-        "/usr/local/cuda-12.1/lib64",
-        "/usr/local/cuda-12.2/lib64",
-        "/usr/local/cuda-12.4/lib64",
-        "/usr/lib/x86_64-linux-gnu",
+def find_dataset_files(jsonl_arg: str, audio_arg: str) -> tuple[Path, Path]:
+    """Tự động tìm kiếm file train.jsonl và thư mục audio trong repo."""
+    candidates_jsonl = [
+        Path(jsonl_arg),
+        REPO_ROOT / jsonl_arg,
+        REPO_ROOT / "train" / "train.jsonl",
+        REPO_ROOT / "data" / "train" / "train.jsonl",
+        REPO_ROOT / "data" / "task1_lifemate" / "train+public_test" / "train" / "train.jsonl",
     ]
+    resolved_jsonl: Path | None = None
+    for p in candidates_jsonl:
+        if p.exists() and p.is_file():
+            resolved_jsonl = p
+            break
 
-    for path_entry in sys.path:
-        nvidia_dir = os.path.join(path_entry, "nvidia")
-        if os.path.isdir(nvidia_dir):
-            candidate_dirs.extend(glob.glob(os.path.join(nvidia_dir, "*", "lib")))
+    if resolved_jsonl is None:
+        raise FileNotFoundError(f"Không tìm thấy file dataset: {jsonl_arg}")
 
-    valid_dirs = [d for d in candidate_dirs if os.path.isdir(d)]
-    if valid_dirs:
-        curr_ld = os.environ.get("LD_LIBRARY_PATH", "")
-        os.environ["LD_LIBRARY_PATH"] = ":".join(valid_dirs + [curr_ld]).strip(":")
+    candidates_audio = [
+        Path(audio_arg),
+        REPO_ROOT / audio_arg,
+        resolved_jsonl.parent,
+        REPO_ROOT / "train",
+        REPO_ROOT / "data" / "task1_lifemate" / "train+public_test" / "train",
+    ]
+    resolved_audio: Path | None = None
+    for p in candidates_audio:
+        if p.exists() and (p / "audio").exists():
+            resolved_audio = p
+            break
+        if p.exists() and p.is_dir():
+            resolved_audio = p
 
-    mode = getattr(ctypes, "RTLD_GLOBAL", 0x100)
-    for c_dir in valid_dirs:
-        for pattern in ["libcublas.so.12*", "libcublasLt.so.12*", "libcudnn*.so*"]:
-            for lib_path in glob.glob(os.path.join(c_dir, pattern)):
-                with contextlib.suppress(Exception):
-                    ctypes.CDLL(lib_path, mode=mode)
+    if resolved_audio is None:
+        resolved_audio = resolved_jsonl.parent
 
-setup_cuda_libraries()
-
-
-def normalize_vietnamese_text(text: str) -> str:
-    """
-    Chuẩn hóa văn bản tiếng Việt:
-    - Unicode NFC
-    - Chuyển thành chữ thường (lowercase)
-    - Loại bỏ dấu câu và ký tự đặc biệt
-    - Xóa khoảng trắng thừa
-    """
-    if not text:
-        return ""
-    text = unicodedata.normalize("NFC", text)
-    text = text.lower()
-    # Loại bỏ dấu câu
-    text = re.sub(r"[^\w\s]", " ", text)
-    # Gom khoảng trắng
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+    return resolved_jsonl, resolved_audio
 
 
-def resolve_audio_path(audio_path_str: str, audio_roots: list[Path]) -> Path:
-    """Tìm đường dẫn file audio thực tế từ danh sách các thư mục ứng viên."""
-    candidate = Path(audio_path_str)
-    if candidate.exists():
-        return candidate
+def resolve_sample_audio_path(audio_root: Path, item: dict[str, Any]) -> Path | None:
+    """Xác định đường dẫn tuyệt đối của file wav tương ứng với 1 sample."""
+    audio_field = item.get("audio") or item.get("audio_path")
+    sample_id = item.get("id", "")
 
-    for root in audio_roots:
-        p1 = root / audio_path_str
-        if p1.exists():
-            return p1
-        # Thử bỏ prefix "audio/" nếu root đã trỏ vào audio
-        if audio_path_str.startswith("audio/"):
-            p2 = root / audio_path_str[6:]
-            if p2.exists():
-                return p2
+    candidates: list[Path] = []
+    if audio_field:
+        candidates.append(audio_root / audio_field)
+        candidates.append(audio_root / "audio" / audio_field)
+        candidates.append(audio_root / audio_field.replace("audio/", ""))
+    if sample_id:
+        candidates.append(audio_root / "audio" / sample_id / f"{sample_id}.wav")
+        candidates.append(audio_root / sample_id / f"{sample_id}.wav")
 
-    raise FileNotFoundError(
-        f"Không tìm thấy file audio '{audio_path_str}' trong các thư mục: {[str(r) for r in audio_roots]}"
-    )
+    for c in candidates:
+        if c.exists() and c.is_file():
+            return c
 
-
-def load_dataset(jsonl_path: Path, limit: int) -> list[dict[str, Any]]:
-    """Đọc dữ liệu từ file JSONL."""
-    samples = []
-    with open(jsonl_path, "r", encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            if limit > 0 and i >= limit:
-                break
-            line = line.strip()
-            if line:
-                samples.append(json.loads(line))
-    return samples
+    return None
 
 
-def get_peak_memory_mb(device: str) -> float:
-    """Lấy lượng bộ nhớ đỉnh điểm (Peak VRAM nếu GPU, Peak RAM nếu CPU)."""
-    if device == "cuda" and torch.cuda.is_available():
-        return float(torch.cuda.max_memory_allocated() / (1024 * 1024))
-    with contextlib.suppress(Exception):
-        import psutil
-        return float(psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024))
-    return 0.0
-
-
-def benchmark_single_model(
-    model_name: str,
-    model_path: str,
-    samples: list[dict[str, Any]],
-    audio_roots: list[Path],
-    device: str,
-    compute_type: str,
-) -> tuple[list[str], float, float]:
-    """
-    Chạy suy luận cho 1 mô hình trên danh sách mẫu và đo thời gian, bộ nhớ.
-    """
-    print(f"\n--- Đang tải mô hình: {model_name} (path: {model_path}) ---")
-    if device == "cuda" and torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
-
-    t_load_start = time.perf_counter()
-    model = faster_whisper.WhisperModel(
-        model_path,
-        device=device,
-        compute_type=compute_type,
-    )
-    t_load = time.perf_counter() - t_load_start
-    print(f"[{model_name}] Thời gian nạp model: {t_load:.2f}s | Device: {device} | Compute: {compute_type}")
-
-    predictions: list[str] = []
-    latencies: list[float] = []
-
-    print(f"[{model_name}] Đang suy luận trên {len(samples)} mẫu...")
-    for idx, sample in enumerate(samples):
-        wav_path = resolve_audio_path(sample["audio"], audio_roots)
-        t0 = time.perf_counter()
-
-        # Phiên âm với VAD filter, beam=5, greedy temperature=0.0
-        try:
-            segments, _ = model.transcribe(
-                str(wav_path),
-                vad_filter=True,
-                beam_size=5,
-                temperature=0.0,
-                language="vi",
-                without_timestamps=True,
-            )
-            seg_list = list(segments)
-        except RuntimeError as e:
-            if ("libcublas" in str(e).lower() or "cuda" in str(e).lower() or "cannot be loaded" in str(e).lower()) and device == "cuda":
-                print(f"\n[TỰ ĐỘNG KHẮC PHỤC] Phát hiện lỗi CUDA ({e}). Tự động chuyển model sang chế độ CPU (int8)...")
-                device = "cpu"
-                compute_type = "int8"
-                del model
-                model = faster_whisper.WhisperModel(
-                    model_path,
-                    device="cpu",
-                    compute_type="int8",
-                )
-                segments, _ = model.transcribe(
-                    str(wav_path),
-                    vad_filter=True,
-                    beam_size=5,
-                    temperature=0.0,
-                    language="vi",
-                    without_timestamps=True,
-                )
-                seg_list = list(segments)
-            else:
-                raise
-
-        text = " ".join(seg.text.strip() for seg in seg_list).strip()
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0
-
-        predictions.append(text)
-        latencies.append(elapsed_ms)
-
-        if (idx + 1) % 50 == 0 or (idx + 1) == len(samples):
-            avg_so_far = sum(latencies) / len(latencies)
-            print(f"  -> Tiến độ: {idx + 1}/{len(samples)} | Trung bình: {avg_so_far:.1f} ms/mẫu")
-
-    avg_latency_ms = sum(latencies) / len(latencies) if latencies else 0.0
-    peak_mem = get_peak_memory_mb(device)
-
-    # Giải phóng bộ nhớ model
-    del model
-    if device == "cuda" and torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    return predictions, avg_latency_ms, peak_mem
-
-
-def export_diff_report(
-    output_path: Path,
-    samples: list[dict[str, Any]],
-    preds_small: list[str],
-    preds_large: list[str],
-    top_k: int = 30,
+def run_asr_benchmark(
+    *,
+    train_jsonl: Path,
+    audio_root: Path,
+    limit: int = 500,
+    device: str = "cpu",
+    output_summary: Path = Path("logs/asr_benchmark_500_summary.md"),
+    output_details: Path = Path("logs/asr_benchmark_500_details.parquet"),
+    output_errors: Path = Path("logs/asr_500_error_analysis.md"),
 ) -> None:
-    """
-    Xuất file markdown gồm top K câu có độ chênh lệch WER lớn nhất giữa 2 mô hình.
-    """
-    diff_records = []
-    for i, sample in enumerate(samples):
-        gold = sample.get("audio_text", "").strip()
-        p_small = preds_small[i]
-        p_large = preds_large[i]
+    print("=" * 80)
+    print("ZALO AI CHALLENGE 2026 - TASK 1: BENCHMARK ASR 4 TẦNG (500 MẪU)")
+    print("Mô hình so sánh: Gipformer-68M vs ZipFormer-150M (+ Silero VAD + Capu + ITN)")
+    print("=" * 80)
+    print(f"Dataset JSONL : {train_jsonl}")
+    print(f"Audio Root    : {audio_root}")
+    print(f"Giới hạn mẫu  : {limit}")
+    print(f"Thiết bị      : {device}")
+    print("-" * 80)
 
-        # Tính WER từng câu
-        wer_small = jiwer.wer(gold, p_small) if gold else 0.0
-        wer_large = jiwer.wer(gold, p_large) if gold else 0.0
-        delta = abs(wer_small - wer_large)
+    # 1. Đọc dữ liệu
+    samples: list[dict[str, Any]] = []
+    with open(train_jsonl, encoding="utf-8") as f:
+        for line in f:
+            line_str = line.strip()
+            if not line_str:
+                continue
+            item = json.loads(line_str)
+            gold_text = item.get("audio_text") or item.get("transcript") or item.get("text")
+            if not gold_text:
+                continue
+            audio_path = resolve_sample_audio_path(audio_root, item)
+            if audio_path is None:
+                continue
+            item["_resolved_audio"] = audio_path
+            item["_gold_text"] = gold_text
+            samples.append(item)
+            if len(samples) >= limit:
+                break
 
-        diff_records.append({
-            "id": sample.get("id", f"sample_{i}"),
-            "gold": gold,
-            "p_small": p_small,
-            "p_large": p_large,
-            "wer_small": wer_small,
-            "wer_large": wer_large,
-            "delta": delta,
+    print(f"[OK] Đã nạp thành công {len(samples)} mẫu hợp lệ kèm file audio.")
+    if not samples:
+        raise ValueError("Không tìm thấy mẫu nào hợp lệ để đánh giá!")
+
+    # 2. Khởi tạo Pipeline cho cả 2 model
+    print("\n[1/3] Đang khởi tạo Pipeline Gipformer-68M (+ nạp chung tầng Capu)...")
+    pipe_gip = SherpaXLMPipeline(
+        model_name_or_dir="models/asr/gipformer-68m",
+        vad_model_path="models/asr/vad/silero_vad.onnx",
+        capu_model_dir="models/asr/xlm-roberta-capu",
+        device=device,
+        num_threads=4,
+        enable_capu=True,
+        enable_itn=True,
+    )
+
+    print("[2/3] Đang khởi tạo Pipeline ZipFormer-150M (tái sử dụng tầng Capu)...")
+    pipe_zip = SherpaXLMPipeline(
+        model_name_or_dir="models/asr/zipformer-150m",
+        vad_model_path="models/asr/vad/silero_vad.onnx",
+        capu_model=pipe_gip.capu_model,
+        device=device,
+        num_threads=4,
+        enable_capu=True,
+        enable_itn=True,
+    )
+
+    # Warmup
+    print("[3/3] Đang warmup cả 2 pipeline...")
+    first_wav = samples[0]["_resolved_audio"]
+    pipe_gip.transcribe(first_wav)
+    pipe_zip.transcribe(first_wav)
+    print("[OK] Warmup hoàn tất!\n")
+
+    # 3. Chạy thực nghiệm trên toàn bộ samples
+    records: list[dict[str, Any]] = []
+
+    print(f"Bắt đầu thực nghiệm ASR trên {len(samples)} mẫu...")
+    pbar = tqdm(samples, desc="Benchmarking ASR", unit="sample")
+
+    for s in pbar:
+        wav_path: Path = s["_resolved_audio"]
+        gold_raw: str = s["_gold_text"]
+        gold_norm: str = normalize_text_for_acoustic_eval(gold_raw)
+
+        # Chạy Gipformer
+        res_gip = pipe_gip.transcribe(wav_path)
+        gip_norm = normalize_text_for_acoustic_eval(res_gip.final_text)
+
+        # Chạy ZipFormer
+        res_zip = pipe_zip.transcribe(wav_path)
+        zip_norm = normalize_text_for_acoustic_eval(res_zip.final_text)
+
+        # WER riêng cho mẫu này để phân tích lỗi
+        clean_g_norm = gold_norm if gold_norm else "<empty>"
+        wer_gip_sample = float(jiwer.wer(clean_g_norm, gip_norm if gip_norm else "<empty>")) * 100.0
+        wer_zip_sample = float(jiwer.wer(clean_g_norm, zip_norm if zip_norm else "<empty>")) * 100.0
+
+        records.append({
+            "id": s.get("id", ""),
+            "audio_path": str(wav_path),
+            "audio_duration_sec": res_gip.duration_sec,
+            "gold_text": gold_raw,
+            "gold_norm": gold_norm,
+            # Gipformer
+            "gip_raw_acoustic": res_gip.raw_acoustic_text,
+            "gip_capu": res_gip.capu_text,
+            "gip_final": res_gip.final_text,
+            "gip_final_norm": gip_norm,
+            "gip_latency_ms": res_gip.inference_time_sec * 1000.0,
+            "gip_infer_time_sec": res_gip.inference_time_sec,
+            "gip_wer_sample": wer_gip_sample,
+            # ZipFormer
+            "zip_raw_acoustic": res_zip.raw_acoustic_text,
+            "zip_capu": res_zip.capu_text,
+            "zip_final": res_zip.final_text,
+            "zip_final_norm": zip_norm,
+            "zip_latency_ms": res_zip.inference_time_sec * 1000.0,
+            "zip_infer_time_sec": res_zip.inference_time_sec,
+            "zip_wer_sample": wer_zip_sample,
+            # Độ chênh lệch giữa 2 model
+            "wer_diff": abs(wer_gip_sample - wer_zip_sample),
+            "max_wer": max(wer_gip_sample, wer_zip_sample),
         })
 
-    # Sắp xếp giảm dần theo chênh lệch WER
-    diff_records.sort(key=lambda x: x["delta"], reverse=True)
-    top_records = diff_records[:top_k]
+    # 4. Tính toán Corpus Metrics
+    gold_texts = [r["gold_text"] for r in records]
+    durations = [r["audio_duration_sec"] for r in records]
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write("# BÁO CÁO ĐỐI SOÁT PHIÊN ÂM ASR (TOP 30 MẪU CHÊNH LỆCH LỚN NHẤT)\n\n")
-        f.write("> **Mục đích:** Đánh giá khả năng viết hoa tên riêng (ví dụ: 'Sếp Dũng', 'Đà Nẵng'), ")
-        f.write("chuẩn hóa chữ số/giờ giấc và độ bền âm học giữa `PhoASR-small` và `PhoWhisper-large`.\n\n")
+    # Metrics Gipformer
+    gip_finals = [r["gip_final"] for r in records]
+    gip_times = [r["gip_infer_time_sec"] for r in records]
+    gip_metrics: ASRCorpusMetrics = compute_corpus_metrics(
+        gold_texts=gold_texts,
+        pred_raw_texts=gip_finals,
+        audio_durations_sec=durations,
+        inference_times_sec=gip_times,
+    )
 
-        f.write("| STT | Question ID | Chênh lệch Delta | WER PhoASR-small | WER PhoWhisper-large |\n")
-        f.write("|---|---|---|---|---|\n")
-        f.writelines(f"| {rank} | `{r['id']}` | {r['delta']:.2f} | {r['wer_small']:.2f} | {r['wer_large']:.2f} |\n" for rank, r in enumerate(top_records, 1))
+    # Metrics ZipFormer
+    zip_finals = [r["zip_final"] for r in records]
+    zip_times = [r["zip_infer_time_sec"] for r in records]
+    zip_metrics: ASRCorpusMetrics = compute_corpus_metrics(
+        gold_texts=gold_texts,
+        pred_raw_texts=zip_finals,
+        audio_durations_sec=durations,
+        inference_times_sec=zip_times,
+    )
 
-        f.write("\n---\n\n## CHI TIẾT TỪNG MẪU\n\n")
-        for rank, r in enumerate(top_records, 1):
-            f.write(f"### Mẫu {rank}: `{r['id']}` (Delta WER: {r['delta']:.2f})\n")
-            f.write(f"- **Chuẩn BTC (Gold):** `{r['gold']}`\n")
-            f.write(f"- **PhoASR-whisper-small (0.24B):** `{r['p_small']}` *(WER: {r['wer_small']:.2f})*\n")
-            f.write(f"- **PhoWhisper-large (1.54B):** `{r['p_large']}` *(WER: {r['wer_large']:.2f})*\n\n")
+    # 5. In bảng kết quả Markdown
+    summary_md = f"""# BÁO CÁO ĐÁNH GIÁ SO SÁNH ASR 4 TẦNG (500 MẪU)
+**Dự án:** Zalo AI Challenge 2026 - Task 1 (Lifemate)  
+**Thời gian thực hiện:** {time.strftime('%Y-%m-%d %H:%M:%S')}  
+**Tập dữ liệu:** `{train_jsonl.name}` ({len(records)} mẫu) | Tổng thời lượng audio: {gip_metrics.total_audio_duration_sec:.1f}s ({gip_metrics.total_audio_duration_sec / 60:.1f} phút)  
+**Cấu hình phần cứng & Thiết bị:** `{device.upper()}`
 
-    print(f"\n[OK] Đã xuất báo cáo đối soát tại: {output_path}")
+---
+
+## 1. Bảng So Sánh Toàn Diện 6 Tiêu Chuẩn Định Lượng
+
+| Tiêu chí đánh giá | Gipformer-68M (~68M params) | ZipFormer-150M (~153M params) | Chênh lệch (Zip - Gip) | Mô hình tốt hơn |
+| :--- | :---: | :---: | :---: | :---: |
+| **Normalized WER (%)** (Acoustic thuần) | **{gip_metrics.normalized_wer:.2f}%** | **{zip_metrics.normalized_wer:.2f}%** | {zip_metrics.normalized_wer - gip_metrics.normalized_wer:+.2f}% | {'ZipFormer' if zip_metrics.normalized_wer < gip_metrics.normalized_wer else 'Gipformer'} |
+| **Normalized CER (%)** | **{gip_metrics.normalized_cer:.2f}%** | **{zip_metrics.normalized_cer:.2f}%** | {zip_metrics.normalized_cer - gip_metrics.normalized_cer:+.2f}% | {'ZipFormer' if zip_metrics.normalized_cer < gip_metrics.normalized_cer else 'Gipformer'} |
+| **Raw WER (%)** (Sau Capu + ITN) | **{gip_metrics.raw_wer:.2f}%** | **{zip_metrics.raw_wer:.2f}%** | {zip_metrics.raw_wer - gip_metrics.raw_wer:+.2f}% | {'ZipFormer' if zip_metrics.raw_wer < gip_metrics.raw_wer else 'Gipformer'} |
+| **Raw CER (%)** (Sau Capu + ITN) | **{gip_metrics.raw_cer:.2f}%** | **{zip_metrics.raw_cer:.2f}%** | {zip_metrics.raw_cer - gip_metrics.raw_cer:+.2f}% | {'ZipFormer' if zip_metrics.raw_cer < gip_metrics.raw_cer else 'Gipformer'} |
+| **Exact Sentence Match (Normalized)** | **{gip_metrics.exact_match_norm_pct:.1f}%** | **{zip_metrics.exact_match_norm_pct:.1f}%** | {zip_metrics.exact_match_norm_pct - gip_metrics.exact_match_norm_pct:+.1f}% | {'ZipFormer' if zip_metrics.exact_match_norm_pct > gip_metrics.exact_match_norm_pct else 'Gipformer'} |
+| **Exact Sentence Match (Raw)** | **{gip_metrics.exact_match_raw_pct:.1f}%** | **{zip_metrics.exact_match_raw_pct:.1f}%** | {zip_metrics.exact_match_raw_pct - gip_metrics.exact_match_raw_pct:+.1f}% | {'ZipFormer' if zip_metrics.exact_match_raw_pct > gip_metrics.exact_match_raw_pct else 'Gipformer'} |
+| **Number / Digit Recall (%)** | **{gip_metrics.number_recall_pct:.1f}%** ({gip_metrics.matched_gold_numbers}/{gip_metrics.total_gold_numbers}) | **{zip_metrics.number_recall_pct:.1f}%** ({zip_metrics.matched_gold_numbers}/{zip_metrics.total_gold_numbers}) | {zip_metrics.number_recall_pct - gip_metrics.number_recall_pct:+.1f}% | {'ZipFormer' if zip_metrics.number_recall_pct > gip_metrics.number_recall_pct else 'Gipformer'} |
+| **Capitalized Entity Recall (%)** | **{gip_metrics.capitalized_recall_pct:.1f}%** ({gip_metrics.matched_gold_entities}/{gip_metrics.total_gold_entities}) | **{zip_metrics.capitalized_recall_pct:.1f}%** ({zip_metrics.matched_gold_entities}/{zip_metrics.total_gold_entities}) | {zip_metrics.capitalized_recall_pct - gip_metrics.capitalized_recall_pct:+.1f}% | {'ZipFormer' if zip_metrics.capitalized_recall_pct > gip_metrics.capitalized_recall_pct else 'Gipformer'} |
+| **Độ trễ trung bình (ms/sample)** | **{gip_metrics.avg_latency_ms:.1f} ms** | **{zip_metrics.avg_latency_ms:.1f} ms** | {zip_metrics.avg_latency_ms - gip_metrics.avg_latency_ms:+.1f} ms | {'Gipformer (Nhanh hơn)' if gip_metrics.avg_latency_ms < zip_metrics.avg_latency_ms else 'ZipFormer'} |
+| **Real-Time Factor (RTF)** | **{gip_metrics.real_time_factor:.4f}** | **{zip_metrics.real_time_factor:.4f}** | {zip_metrics.real_time_factor - gip_metrics.real_time_factor:+.4f} | {'Gipformer' if gip_metrics.real_time_factor < zip_metrics.real_time_factor else 'ZipFormer'} |
+
+---
+
+## 2. Phân Tích Kỹ Thuật Chuyên Sâu (Falsify Protocol)
+
+1. **Hiệu năng Âm học (Acoustic Performance):**
+   - Gipformer-68M có Normalized WER là `{gip_metrics.normalized_wer:.2f}%`.
+   - ZipFormer-150M có Normalized WER là `{zip_metrics.normalized_wer:.2f}%`.
+2. **Vai trò của XLM-RoBERTa Capu & Vietnamese ITN:**
+   - Khôi phục chính xác các thực thể viết hoa (Tên riêng như Lan, Dũng, SJC, Ba, Vy...) đạt `{max(gip_metrics.capitalized_recall_pct, zip_metrics.capitalized_recall_pct):.1f}%`.
+   - Khôi phục số lượng và ngày giờ đạt Number Recall `{max(gip_metrics.number_recall_pct, zip_metrics.number_recall_pct):.1f}%`.
+3. **Ngân sách tham số & Tốc độ thực thi:**
+   - Gipformer Pipeline: ~348M tham số, RTF = `{gip_metrics.real_time_factor:.4f}`.
+   - ZipFormer Pipeline: ~433M tham số, RTF = `{zip_metrics.real_time_factor:.4f}`.
+   - Cả 2 phương án đều bảo toàn > 5.5B tham số cho LLM và đáp ứng trần < 6B của đề thi.
+"""
+
+    print("\n" + summary_md)
+
+    # 6. Lưu file Summary
+    output_summary.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_summary, "w", encoding="utf-8") as f:
+        f.write(summary_md)
+    print(f"[OK] Đã lưu báo cáo tổng hợp tại: {output_summary}")
+
+    # 7. Lưu file Parquet chi tiết
+    output_details.parent.mkdir(parents=True, exist_ok=True)
+    df = pd.DataFrame(records)
+    df.to_parquet(output_details, index=False)
+    print(f"[OK] Đã lưu chi tiết 500 mẫu tại: {output_details} ({len(df)} dòng)")
+
+    # 8. Xuất file Error Analysis (Top 50 mẫu lỗi nhất / lệch nhất)
+    # Sắp xếp theo max_wer giảm dần
+    sorted_errors = sorted(records, key=lambda x: (x["max_wer"], x["wer_diff"]), reverse=True)[:50]
+
+    err_lines = [
+        "# PHÂN TÍCH 50 MẪU SAI SỐ LỚN NHẤT / LỆCH NHAU NHẤT (ERROR ANALYSIS)",
+        f"**Tổng số mẫu khảo sát:** {len(records)} | **Số mẫu được phân tích chi tiết:** {len(sorted_errors)}",
+        "",
+        "Mỗi mẫu hiển thị 4 dòng định dạng chuẩn:",
+        "- **Gold**: Văn bản đối chiếu gốc",
+        "- **Raw Acoustic**: Đầu ra âm học chữ thường (Gipformer vs ZipFormer)",
+        "- **Gipformer Final**: Văn bản hoàn chỉnh sau Capu + ITN của Gipformer-68M",
+        "- **ZipFormer Final**: Văn bản hoàn chỉnh sau Capu + ITN của ZipFormer-150M",
+        "",
+        "---",
+        "",
+    ]
+
+    for idx, item in enumerate(sorted_errors, start=1):
+        err_lines.append(f"### Mẫu {idx} [ID: {item['id']}] - Gip WER: {item['gip_wer_sample']:.1f}% | Zip WER: {item['zip_wer_sample']:.1f}%")
+        err_lines.append(f"- **Gold**: `{item['gold_text']}`")
+        err_lines.append(f"- **Raw Acoustic**: Gip: `{item['gip_raw_acoustic']}` | Zip: `{item['zip_raw_acoustic']}`")
+        err_lines.append(f"- **Gipformer Final**: `{item['gip_final']}`")
+        err_lines.append(f"- **ZipFormer Final**: `{item['zip_final']}`")
+        err_lines.append("")
+
+    output_errors.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_errors, "w", encoding="utf-8") as f:
+        f.write("\n".join(err_lines))
+    print(f"[OK] Đã lưu 50 mẫu lỗi tại: {output_errors}")
+    print("=" * 80 + "\n")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Benchmark ASR Models for Zalo AI Challenge 2026")
-    parser.add_argument(
-        "--train-jsonl",
-        type=str,
-        default="train/train.jsonl",
-        help="Đường dẫn file train.jsonl (mặc định: train/train.jsonl hoặc data/train/train.jsonl)",
-    )
-    parser.add_argument(
-        "--audio-root",
-        type=str,
-        default="train",
-        help="Thư mục chứa audio gốc (mặc định: train hoặc data/train)",
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=200,
-        help="Số lượng mẫu benchmark (mặc định: 200)",
-    )
+    parser = argparse.ArgumentParser(description="Benchmark ASR 4 tầng trên 500 mẫu dataset Zalo AI Challenge 2026")
+    parser.add_argument("--train-jsonl", type=str, default="train/train.jsonl", help="Đường dẫn file train.jsonl")
+    parser.add_argument("--audio-root", type=str, default="train", help="Thư mục gốc chứa audio")
+    parser.add_argument("--limit", type=int, default=500, help="Số lượng mẫu đánh giá (mặc định: 500)")
     parser.add_argument(
         "--device",
         type=str,
         default="cuda" if torch.cuda.is_available() else "cpu",
-        help="Thiết bị suy luận: cuda hoặc cpu (tự động phát hiện)",
+        help="Thiết bị chạy Capu & sherpa (cuda hoặc cpu)",
     )
-    parser.add_argument(
-        "--compute-type",
-        type=str,
-        default="float16" if torch.cuda.is_available() else "int8",
-        help="Kiểu tính toán CTranslate2: float16, int8, float32 (mặc định: float16 trên GPU, int8 trên CPU)",
-    )
-    parser.add_argument(
-        "--output-diff",
-        type=str,
-        default="logs/asr_comparison_diff.md",
-        help="Đường dẫn file markdown xuất 30 câu khác nhau nhất",
-    )
-    parser.add_argument(
-        "--models-dir",
-        type=str,
-        default="models/asr",
-        help="Thư mục chứa các mô hình đã convert",
-    )
+    parser.add_argument("--output-summary", type=str, default="logs/asr_benchmark_500_summary.md")
+    parser.add_argument("--output-details", type=str, default="logs/asr_benchmark_500_details.parquet")
+    parser.add_argument("--output-errors", type=str, default="logs/asr_500_error_analysis.md")
     args = parser.parse_args()
 
-    # Tìm file train.jsonl
-    train_path = Path(args.train_jsonl)
-    if not train_path.exists():
-        candidates = [
-            Path("data/train/train.jsonl"),
-            Path("train+public_test/train/train.jsonl"),
-            Path("data/train+public_test/train/train.jsonl"),
-            Path("train/train.jsonl"),
-            Path("train.jsonl"),
-        ]
-        found = None
-        for c in candidates:
-            if c.exists():
-                found = c
-                break
-        if not found:
-            # Tìm đệ quy trong thư mục làm việc và /content nếu trên Colab
-            matches = [
-                p for p in Path(".").glob("**/train.jsonl")
-                if "split" not in p.name and "val" not in p.name
-            ]
-            if not matches and Path("/content").exists():
-                matches = [
-                    p for p in Path("/content").glob("**/train.jsonl")
-                    if "split" not in p.name and "val" not in p.name
-                ]
-            if matches:
-                found = matches[0]
+    jsonl_path, audio_path = find_dataset_files(args.train_jsonl, args.audio_root)
 
-        if found:
-            train_path = found
-            print(f"[TỰ ĐỘNG PHÁT HIỆN] Tìm thấy file dataset tại: {train_path}")
-        else:
-            raise FileNotFoundError(
-                f"Không tìm thấy file dataset: {args.train_jsonl}. Vui lòng kiểm tra thư mục đã giải nén."
-            )
-
-    # Danh sách các thư mục audio ứng viên
-    audio_roots = [
-        Path(args.audio_root),
-        train_path.parent,
-        train_path.parent / "audio",
-        Path("train"),
-        Path("train+public_test/train"),
-        Path("data/train"),
-        Path("train/audio"),
-        Path("data/train/audio"),
-    ]
-
-    models_dir = Path(args.models_dir)
-    model_small_path = models_dir / "PhoASR-whisper-small-ct2"
-    model_large_path = models_dir / "PhoWhisper-large-ct2"
-
-    if not model_small_path.exists():
-        raise FileNotFoundError(f"Chưa có model: {model_small_path}. Hãy chạy scripts/setup_asr_models.py trước.")
-    if not model_large_path.exists():
-        raise FileNotFoundError(f"Chưa có model: {model_large_path}. Hãy chạy scripts/setup_asr_models.py trước.")
-
-    print("=" * 70)
-    print("THIẾT LẬP THỰC NGHIỆM ASR BENCHMARK (TASK 1 - LIFEMATE)")
-    print("=" * 70)
-    print(f"Dataset path   : {train_path}")
-    print(f"Số mẫu kiểm thử: {args.limit}")
-    print(f"Device         : {args.device}")
-    print(f"Compute Type   : {args.compute_type}")
-    print(f"Model Small    : {model_small_path}")
-    print(f"Model Large    : {model_large_path}")
-
-    # Đọc dữ liệu
-    samples = load_dataset(train_path, limit=args.limit)
-    print(f"Đã nạp {len(samples)} mẫu từ {train_path}")
-
-    # Benchmark Model 1: PhoASR-whisper-small-ct2 (0.24B)
-    preds_small, lat_small, mem_small = benchmark_single_model(
-        model_name="PhoASR-whisper-small-ct2 (0.24B)",
-        model_path=str(model_small_path),
-        samples=samples,
-        audio_roots=audio_roots,
+    run_asr_benchmark(
+        train_jsonl=jsonl_path,
+        audio_root=audio_path,
+        limit=args.limit,
         device=args.device,
-        compute_type=args.compute_type,
-    )
-
-    # Benchmark Model 2: PhoWhisper-large-ct2 (1.54B)
-    preds_large, lat_large, mem_large = benchmark_single_model(
-        model_name="PhoWhisper-large-ct2 (1.54B)",
-        model_path=str(model_large_path),
-        samples=samples,
-        audio_roots=audio_roots,
-        device=args.device,
-        compute_type=args.compute_type,
-    )
-
-    # Tính toán Metrics
-    gold_raw = [s.get("audio_text", "").strip() for s in samples]
-    gold_norm = [normalize_vietnamese_text(t) for t in gold_raw]
-
-    preds_small_norm = [normalize_vietnamese_text(t) for t in preds_small]
-    preds_large_norm = [normalize_vietnamese_text(t) for t in preds_large]
-
-    # Raw metrics
-    raw_wer_small = jiwer.wer(gold_raw, preds_small) * 100.0
-    raw_cer_small = jiwer.cer(gold_raw, preds_small) * 100.0
-
-    raw_wer_large = jiwer.wer(gold_raw, preds_large) * 100.0
-    raw_cer_large = jiwer.cer(gold_raw, preds_large) * 100.0
-
-    # Normalized metrics
-    norm_wer_small = jiwer.wer(gold_norm, preds_small_norm) * 100.0
-    norm_cer_small = jiwer.cer(gold_norm, preds_small_norm) * 100.0
-
-    norm_wer_large = jiwer.wer(gold_norm, preds_large_norm) * 100.0
-    norm_cer_large = jiwer.cer(gold_norm, preds_large_norm) * 100.0
-
-    mem_unit = "MB VRAM (Peak)" if args.device == "cuda" else "MB RAM (RSS)"
-
-    # In Bảng Markdown So Sánh
-    print("\n" + "=" * 80)
-    print("BẢNG SO SÁNH TRỰC TIẾP HIỆU NĂNG ASR TRÊN 200 MẪU ĐẦU TIÊN (TASK 1)")
-    print("=" * 80)
-    table_md = f"""| Chỉ số đánh giá | PhoASR-whisper-small-ct2 (0.24B) | PhoWhisper-large-ct2 (1.54B) | Chênh lệch (Large vs Small) |
-|---|:---:|:---:|:---:|
-| **Tổng số tham số** | **241,734,912** (~0.24B) | **1,543,304,960** (~1.54B) | +1.30B (+538%) |
-| **Raw WER** (giữ hoa/thường, dấu) | **{raw_wer_small:.2f}%** | **{raw_wer_large:.2f}%** | {raw_wer_large - raw_wer_small:+.2f}% |
-| **Raw CER** (giữ hoa/thường, dấu) | **{raw_cer_small:.2f}%** | **{raw_cer_large:.2f}%** | {raw_cer_large - raw_cer_small:+.2f}% |
-| **Normalized WER** (lower, no-punct) | **{norm_wer_small:.2f}%** | **{norm_wer_large:.2f}%** | {norm_wer_large - norm_wer_small:+.2f}% |
-| **Normalized CER** (lower, no-punct) | **{norm_cer_small:.2f}%** | **{norm_cer_large:.2f}%** | {norm_cer_large - norm_cer_small:+.2f}% |
-| **Tốc độ trung bình (ms/sample)** | **{lat_small:.1f} ms** | **{lat_large:.1f} ms** | {lat_large / max(lat_small, 1e-3):.2f}x chậm hơn |
-| **Bộ nhớ tiêu thụ đỉnh điểm** | **{mem_small:.1f} {mem_unit}** | **{mem_large:.1f} {mem_unit}** | {mem_large - mem_small:+.1f} MB |"""
-
-    print(table_md)
-    print("=" * 80 + "\n")
-
-    # Xuất file diff markdown
-    export_diff_report(
-        output_path=Path(args.output_diff),
-        samples=samples,
-        preds_small=preds_small,
-        preds_large=preds_large,
-        top_k=30,
+        output_summary=Path(args.output_summary),
+        output_details=Path(args.output_details),
+        output_errors=Path(args.output_errors),
     )
 
 
