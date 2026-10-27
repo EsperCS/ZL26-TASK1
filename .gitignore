@@ -1,19 +1,32 @@
-# User-specified ignores
-/data
-/data/
-/.agent
-/.agent/
-/.agents
-/.agents/
-
-# Datasets
-/train
+# Data directories & Large files
+/data/*
+!/data/cache/
+!/data/cache/.gitkeep
+*.parquet
+*.csv
 /train/
-/train+public_test
+/train
 /train+public_test/
-/public_test
+/train+public_test
 /public_test/
+/public_test
 *.zip
+*.tar.gz
+*.wav
+*.mp3
+*.flac
+
+# Models & Weights
+/models/
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.onnx
+
+# Agent metadata
+/.agent/
+/.agents/
 
 # Python / Environment / venv
 .venv/
@@ -27,6 +40,11 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+
+# Logs & Checkpoints
+!/logs/
+!/logs/.gitkeep
+*.checkpoint.json
 
 # IDE & OS
 .DS_Store

@@ -1,0 +1,157 @@
+
+========================================================================================
+ ZALO AI CHALLENGE 2026 - TASK 1 (LIFEMATE) DATA ANALYSIS REPORT
+ Standards: data-quality-frameworks | python-pro (Python 3.12+)
+========================================================================================
+
+1. TỔNG SỐ MẪU VÀ PHÂN BỐ ĐỘ DÀI FILE .WAV
+----------------------------------------------------------------------------------------
+ * Tổng số mẫu huấn luyện (train.jsonl)      :  1,545 (70.90%)
+ * Tổng số mẫu kiểm thử   (public_test.jsonl) :    634 (29.10%)
+ * Tổng toàn bộ mẫu       (Total Manifest)    :  2,179 (100.00%)
+
+ [Bảng Thống Kê Chi Tiết Độ Dài File .WAV (Đơn vị: Giây)]
+Audio Partition        |  Count |   Min |   Mean | Median |    Max |   Std |   P25 |   P75 |   P95
+--------------------------------------------------------------------------------------------------
+Train (Primary)        |   1545 |  1.74 |   7.23 |   6.94 |  22.33 |  2.66 |  5.39 |  8.60 | 11.84
+Train (History)        |   3491 |  0.99 |   3.84 |   3.53 |  17.09 |  1.48 |  2.84 |  4.48 |  6.56
+Test  (Primary)        |    634 |  1.82 |   7.70 |   7.21 |  20.24 |  2.96 |  5.62 |  9.30 | 13.47
+Test  (History)        |   1299 |  1.10 |   3.90 |   3.62 |  10.31 |  1.45 |  2.88 |  4.58 |  6.81
+--------------------------------------------------------------------------------------------------
+
+ [Phân Bố Độ Dài Audio Lượt Chính (Primary Request Audio)]
+Khoảng thời gian |   Train |      % |   Test |      % | Biểu đồ phân phối Train
+---------------------------------------------------------------------------
+< 3s           |      36 |   2.3% |     15 |   2.4% | [                    ]
+3s - 5s        |     277 |  17.9% |     96 |  15.1% | [####                ]
+5s - 8s        |     717 |  46.4% |    275 |  43.4% | [#########           ]
+8s - 10s       |     304 |  19.7% |    119 |  18.8% | [####                ]
+10s - 15s      |     193 |  12.5% |    120 |  18.9% | [##                  ]
+>= 15s         |      18 |   1.2% |      9 |   1.4% | [                    ]
+
+========================================================================================
+2. TỶ LỆ % CÁC MẪU THEO NHÓM HÀNH ĐỘNG VÀ LỊCH SỬ HỘI THOẠI
+----------------------------------------------------------------------------------------
+ (a) Gọi tool bình thường (Normal Tool Execution)
+     -> Số lượng:  1217 mẫu | Tỷ lệ:  78.77%
+
+ (b) Gọi sys.ask_missing_info (Chủ động hỏi lại thông tin thiếu)
+     -> Số lượng:   217 mẫu | Tỷ lệ:  14.05%
+        * Chỉ gọi hỏi thông tin thiếu (Solo ask) :   60 mẫu (3.88%)
+        * Đọc dữ liệu trước rồi hỏi (Multi-step):  157 mẫu (10.16%)
+
+ (c) Out-of-scope (Không thể xử lý -> tool_calls == [])
+     -> Số lượng:   111 mẫu | Tỷ lệ:   7.18%
+
+ [*] Tổng kiểm tra 3 nhóm độc lập (a + b + c): 1545 / 1545 (100.00%)
+
+ (d) Có lịch sử hội thoại (Conversation History Analysis)
+     -> Mẫu có lịch sử thoại (history >= 1 lượt / len > 0):  1018 mẫu |  65.89%
+     -> Mẫu nhiều lượt thoại sâu (multi-turn / len > 2) :   730 mẫu |  47.25%
+     -> Mẫu đơn lượt (single-turn / len == 0)            :   527 mẫu |  34.11%
+
+     [Bảng Phân Bố Độ Dài History (Số messages trong lịch sử)]
+     Số lượt thoại (Messages)   |  Số mẫu |  Tỷ lệ % | Biểu đồ phân phối
+     -----------------------------------------------------------------
+     0 msgs (single-turn)       |     527 |   34.11% | [######            ]
+     2 msgs (1 turn pairs)      |     288 |   18.64% | [###               ]
+     4 msgs (2 turn pairs)      |     267 |   17.28% | [###               ]
+     6 msgs (3 turn pairs)      |     137 |    8.87% | [##                ]
+     8 msgs (4 turn pairs)      |      81 |    5.24% | [#                 ]
+     10 msgs (5 turn pairs)     |      76 |    4.92% | [#                 ]
+     12 msgs (6 turn pairs)     |      41 |    2.65% | [                  ]
+     18 msgs (9 turn pairs)     |      33 |    2.14% | [                  ]
+     20 msgs (10 turn pairs)    |      47 |    3.04% | [#                 ]
+     22 msgs (11 turn pairs)    |      35 |    2.27% | [                  ]
+     24 msgs (12 turn pairs)    |      13 |    0.84% | [                  ]
+
+========================================================================================
+3. PHÂN BỐ SỐ LƯỢNG TOOL_CALLS VÀ DANH SÁCH ỨNG DỤNG / CATALOG TOOLS
+----------------------------------------------------------------------------------------
+ [Phân Bố Số Lượng Tool Calls Trên Mỗi Mẫu]
+ * Min tool_calls/mẫu  : 0
+ * Max tool_calls/mẫu  : 6
+ * Trung bình (Toàn bộ): 2.292 calls/mẫu (Độ lệch chuẩn: 1.35)
+ * Trung bình (Active) : 2.469 calls/mẫu (chỉ tính mẫu có thực thi tool)
+ * Trung vị (Median)   : 2.0 calls/mẫu
+
+Số tool calls   |   Số mẫu |  Tỷ lệ % | Biểu đồ tần suất
+-------------------------------------------------------
+0               |      111 |    7.18% | [#                 ]
+1               |      369 |   23.88% | [####              ]
+2               |      428 |   27.70% | [#####             ]
+3               |      359 |   23.24% | [####              ]
+4               |      161 |   10.42% | [##                ]
+5               |      107 |    6.93% | [#                 ]
+6               |       10 |    0.65% | [                  ]
+
+ [Danh Sách Toàn Bộ Các Ứng Dụng Trong Catalog (46 Apps, 147 Tools)]
+STT | App ID               | Tên Ứng Dụng           | Nhóm            | #Tools | Cài Đặt | Gọi Train
+----------------------------------------------------------------------------------------------------
+1   | smart_home           | Nhà thông minh         | home            |      6 |     659 |       285
+2   | home_security        | An ninh nhà            | home            |      4 |     133 |        49
+3   | door_lock            | Khoá cửa thông minh    | home            |      3 |     124 |        65
+4   | robot_vacuum         | Robot hút bụi          | home            |      3 |     119 |        48
+5   | appliances           | Thiết bị gia dụng      | home            |      3 |     110 |        47
+6   | home_energy          | Điện năng              | home            |      2 |     121 |        30
+7   | alarm                | Báo thức               | planning        |      4 |     493 |        96
+8   | reminders            | Nhắc việc              | planning        |      4 |     871 |       133
+9   | calendar             | Lịch                   | planning        |      4 |     871 |       202
+10  | notes                | Ghi chú                | planning        |      3 |     557 |        49
+11  | tasks                | Việc cần làm           | planning        |      3 |     543 |        68
+12  | contacts             | Danh bạ                | communication   |      3 |     887 |       244
+13  | phone                | Gọi điện               | communication   |      2 |     529 |        41
+14  | sms                  | Tin nhắn SMS           | communication   |      2 |     426 |        85
+15  | chat_ott             | Nhắn tin OTT           | communication   |      5 |     691 |       187
+16  | email                | Email                  | communication   |      6 |     368 |        51
+17  | video_meeting        | Họp trực tuyến         | communication   |      3 |     126 |        39
+18  | banking              | Ngân hàng              | finance         |      5 |     489 |       210
+19  | ewallet              | Ví điện tử             | finance         |      4 |     549 |        91
+20  | bill_payment         | Thanh toán hoá đơn     | finance         |      3 |     219 |       225
+21  | loyalty              | Thẻ thành viên/ưu đãi  | finance         |      3 |     104 |        48
+22  | weather              | Thời tiết              | information     |      2 |     634 |        78
+23  | gold_price           | Giá vàng               | information     |      1 |     355 |        33
+24  | fuel_price           | Giá xăng dầu           | information     |      1 |     308 |        13
+25  | lottery              | Xổ số                  | information     |      2 |      69 |        26
+26  | exchange_rate        | Tỷ giá                 | information     |      2 |      91 |        25
+27  | news                 | Tin tức                | information     |      3 |     141 |        43
+28  | calculator           | Máy tính & quy đổi     | information     |      2 |     112 |        20
+29  | maps                 | Bản đồ                 | mobility        |      3 |     308 |        54
+30  | food_delivery        | Đặt đồ ăn              | food            |      5 |     457 |        96
+31  | ride_hailing         | Đặt xe                 | mobility        |      4 |     507 |        59
+32  | flights              | Vé máy bay             | travel          |      5 |      98 |        45
+33  | shopping_list        | Danh sách mua sắm      | shopping        |      4 |      99 |        33
+34  | package_tracking     | Theo dõi đơn/bưu kiện  | shopping        |      3 |      93 |        28
+35  | music                | Nghe nhạc              | media           |      4 |     350 |        40
+36  | tv                   | Truyền hình            | media           |      4 |     346 |        22
+37  | podcast_radio        | Podcast & Radio        | media           |      4 |     131 |        43
+38  | medication           | Nhắc uống thuốc        | health          |      4 |     345 |        41
+39  | fitness              | Sức khoẻ & vận động    | health          |      3 |     105 |        41
+40  | learning             | Học tập                | personal        |      4 |     117 |        61
+41  | bike_rental          | Thuê xe đạp            | mobility        |      2 |      98 |        48
+42  | home_automation      | Tự động hoá nhà        | home            |      3 |     115 |        50
+43  | household_chores     | Việc nhà               | home            |      2 |     119 |        51
+44  | library              | Thư viện               | personal        |      2 |     108 |        36
+45  | subscriptions        | Gói đăng ký            | finance         |      2 |     120 |        45
+46  | sys                  | Hệ thống               | control         |      1 |       0 |       217
+----------------------------------------------------------------------------------------------------
+
+========================================================================================
+4. DATA QUALITY SCORECARD (BÁO CÁO KIỂM ĐỊNH CHẤT LƯỢNG DỮ LIỆU)
+----------------------------------------------------------------------------------------
+Dimension       | Quality Rule Check                         | Status | Chi Tiết Kết Quả
+------------------------------------------------------------------------------------------------
+Completeness    | Sample ID non-null                         | PASS   | Train missing ID: 0, Test missing ID: 0
+Completeness    | Audio path present in manifest             | PASS   | Train missing audio: 0, Test missing: 0
+Completeness    | Physical .wav files exist on disk          | PASS   | Train missing files: 0/1545, Test missing files: 0/634
+Completeness    | Train labels present                       | PASS   | Missing label blocks: 0/1545
+Uniqueness      | Sample ID uniqueness within splits         | PASS   | Train duplicate IDs: 0, Test duplicate IDs: 0
+Uniqueness      | Zero ID collision between Train and Test   | PASS   | Overlapping IDs: 0
+Consistency     | Installed apps defined in catalog          | PASS   | Unknown installed apps in train: None
+Consistency     | Label tool_calls defined in catalog        | PASS   | Unrecognized tool calls: None
+Validity        | sys.ask_missing_info payload conformance   | PASS   | Malformed sys.ask_missing_info calls: 0
+------------------------------------------------------------------------------------------------
+ -> ĐÁNH GIÁ CHẤT LƯỢNG DỮ LIỆU: TẤT CẢ CÁC TIÊU CHÍ ĐỀU ĐẠT TIÊU CHUẨN HOÀN TOÀN (100% PASS)!
+
+========================================================================================
+
