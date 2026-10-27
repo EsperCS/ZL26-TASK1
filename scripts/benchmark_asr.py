@@ -67,41 +67,80 @@ from src.eval.asr_metrics import (
 
 
 def find_dataset_files(jsonl_arg: str, audio_arg: str) -> tuple[Path, Path]:
-    """Tự động tìm kiếm file train.jsonl và thư mục audio trong repo."""
+    """Tự động tìm kiếm file train.jsonl và thư mục audio trên cả máy local lẫn Google Colab."""
     candidates_jsonl = [
         Path(jsonl_arg),
         REPO_ROOT / jsonl_arg,
+        Path.cwd() / jsonl_arg,
         REPO_ROOT / "train" / "train.jsonl",
         REPO_ROOT / "data" / "train" / "train.jsonl",
         REPO_ROOT / "data" / "task1_lifemate" / "train+public_test" / "train" / "train.jsonl",
+        # Các đường dẫn phổ biến trên Google Colab
+        Path("/content") / jsonl_arg,
+        Path("/content/train/train.jsonl"),
+        Path("/content/train+public_test/train/train.jsonl"),
+        Path("/content/data/train/train.jsonl"),
+        Path("/content/data/task1_lifemate/train+public_test/train/train.jsonl"),
     ]
+
     resolved_jsonl: Path | None = None
     for p in candidates_jsonl:
         if p.exists() and p.is_file():
-            resolved_jsonl = p
+            resolved_jsonl = p.resolve()
             break
 
+    # Nếu vẫn chưa tìm thấy, quét toàn diện trong /content và thư mục cha
     if resolved_jsonl is None:
-        raise FileNotFoundError(f"Không tìm thấy file dataset: {jsonl_arg}")
+        search_roots = [Path.cwd(), REPO_ROOT, REPO_ROOT.parent]
+        colab_content = Path("/content")
+        if colab_content.exists():
+            search_roots.insert(0, colab_content)
 
+        for root in search_roots:
+            try:
+                found = list(root.rglob("train.jsonl"))
+                if found:
+                    resolved_jsonl = found[0].resolve()
+                    break
+            except (OSError, RuntimeError):
+                continue
+
+    if resolved_jsonl is None:
+        searched_info = "\n  - ".join(str(c) for c in candidates_jsonl)
+        raise FileNotFoundError(
+            f"Không tìm thấy file dataset '{jsonl_arg}'.\n"
+            f"Đã kiểm tra các vị trí sau:\n  - {searched_info}\n"
+            f"Gợi ý cho Colab: hãy truyền --train-jsonl /đường/dẫn/tới/train.jsonl"
+        )
+
+    # Tìm thư mục audio tương ứng
     candidates_audio = [
         Path(audio_arg),
         REPO_ROOT / audio_arg,
+        Path.cwd() / audio_arg,
         resolved_jsonl.parent,
-        REPO_ROOT / "train",
-        REPO_ROOT / "data" / "task1_lifemate" / "train+public_test" / "train",
+        resolved_jsonl.parent / "audio",
+        resolved_jsonl.parent.parent / "audio",
+        Path("/content") / audio_arg,
+        Path("/content/train"),
+        Path("/content/train+public_test/train"),
     ]
+
     resolved_audio: Path | None = None
     for p in candidates_audio:
         if p.exists() and (p / "audio").exists():
-            resolved_audio = p
+            resolved_audio = p.resolve()
             break
-        if p.exists() and p.is_dir():
-            resolved_audio = p
+        if p.exists() and p.is_dir() and any(p.glob("*.wav")):
+            resolved_audio = p.resolve()
+            break
 
     if resolved_audio is None:
+        # Fallback về thư mục chứa train.jsonl
         resolved_audio = resolved_jsonl.parent
 
+    print(f"[TÌM THẤY DỮ LIỆU] Dataset: {resolved_jsonl}")
+    print(f"[TÌM THẤY DỮ LIỆU] Audio Root: {resolved_audio}")
     return resolved_jsonl, resolved_audio
 
 
@@ -114,10 +153,15 @@ def resolve_sample_audio_path(audio_root: Path, item: dict[str, Any]) -> Path | 
     if audio_field:
         candidates.append(audio_root / audio_field)
         candidates.append(audio_root / "audio" / audio_field)
-        candidates.append(audio_root / audio_field.replace("audio/", ""))
+        clean_field = audio_field.replace("audio/", "").replace("audio\\", "")
+        candidates.append(audio_root / clean_field)
+        candidates.append(audio_root / "audio" / clean_field)
+        candidates.append(audio_root.parent / audio_field)
+        candidates.append(audio_root.parent / "audio" / clean_field)
     if sample_id:
         candidates.append(audio_root / "audio" / sample_id / f"{sample_id}.wav")
         candidates.append(audio_root / sample_id / f"{sample_id}.wav")
+        candidates.append(audio_root.parent / "audio" / sample_id / f"{sample_id}.wav")
 
     for c in candidates:
         if c.exists() and c.is_file():
