@@ -317,16 +317,47 @@ def main() -> None:
     # Tìm file train.jsonl
     train_path = Path(args.train_jsonl)
     if not train_path.exists():
-        fallback = Path("data/train/train.jsonl")
-        if fallback.exists():
-            train_path = fallback
+        candidates = [
+            Path("data/train/train.jsonl"),
+            Path("train+public_test/train/train.jsonl"),
+            Path("data/train+public_test/train/train.jsonl"),
+            Path("train/train.jsonl"),
+            Path("train.jsonl"),
+        ]
+        found = None
+        for c in candidates:
+            if c.exists():
+                found = c
+                break
+        if not found:
+            # Tìm đệ quy trong thư mục làm việc và /content nếu trên Colab
+            matches = [
+                p for p in Path(".").glob("**/train.jsonl")
+                if "split" not in p.name and "val" not in p.name
+            ]
+            if not matches and Path("/content").exists():
+                matches = [
+                    p for p in Path("/content").glob("**/train.jsonl")
+                    if "split" not in p.name and "val" not in p.name
+                ]
+            if matches:
+                found = matches[0]
+
+        if found:
+            train_path = found
+            print(f"[TỰ ĐỘNG PHÁT HIỆN] Tìm thấy file dataset tại: {train_path}")
         else:
-            raise FileNotFoundError(f"Không tìm thấy file dataset: {args.train_jsonl}")
+            raise FileNotFoundError(
+                f"Không tìm thấy file dataset: {args.train_jsonl}. Vui lòng kiểm tra thư mục đã giải nén."
+            )
 
     # Danh sách các thư mục audio ứng viên
     audio_roots = [
         Path(args.audio_root),
+        train_path.parent,
+        train_path.parent / "audio",
         Path("train"),
+        Path("train+public_test/train"),
         Path("data/train"),
         Path("train/audio"),
         Path("data/train/audio"),

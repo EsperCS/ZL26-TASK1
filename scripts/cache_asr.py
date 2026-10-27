@@ -84,9 +84,13 @@ def collect_audio_paths(data_dir: Path) -> list[str]:
         "train.jsonl",
         "train/train.jsonl",
         "data/train/train.jsonl",
+        "train+public_test/train/train.jsonl",
+        "data/train+public_test/train/train.jsonl",
         "public_test.jsonl",
         "public_test/public_test.jsonl",
         "data/public_test/public_test.jsonl",
+        "train+public_test/public_test/public_test.jsonl",
+        "data/train+public_test/public_test/public_test.jsonl",
     ]
 
     found_files: list[Path] = []
@@ -272,8 +276,13 @@ def main() -> None:
         data_dir / "train",
         data_dir / "public_test",
         data_dir / "train+public_test",
+        data_dir / "train+public_test" / "train",
+        data_dir / "train+public_test" / "public_test",
         Path("train"),
         Path("public_test"),
+        Path("train+public_test"),
+        Path("train+public_test/train"),
+        Path("train+public_test/public_test"),
         Path("data/train"),
         Path("data/public_test"),
     ]
