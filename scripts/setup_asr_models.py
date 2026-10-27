@@ -172,6 +172,37 @@ def setup_zipformer_150m(target_dir: Path) -> Path:
     return target_dir
 
 
+def _patch_capu_compatibility(capu_dir: Path) -> None:
+    """Tự động khắc phục tương thích mã nguồn cũ của dragonSwing/xlm-roberta-capu với transformers 4.40+ / 5.x."""
+    model_file = capu_dir / "modeling_seq2labels.py"
+    if not model_file.exists():
+        return
+    try:
+        content = model_file.read_text(encoding="utf-8")
+        modified = False
+
+        if "@dataclass" not in content:
+            content = "from dataclasses import dataclass\n" + content
+            content = content.replace(
+                "class Seq2LabelsOutput(ModelOutput):",
+                "@dataclass\nclass Seq2LabelsOutput(ModelOutput):",
+            )
+            modified = True
+
+        if "mean_resizing=False" not in content and "self.bert.resize_token_embeddings(vocab_size + 1)" in content:
+            content = content.replace(
+                "self.bert.resize_token_embeddings(vocab_size + 1)",
+                "self.bert.resize_token_embeddings(vocab_size + 1, mean_resizing=False)",
+            )
+            modified = True
+
+        if modified:
+            model_file.write_text(content, encoding="utf-8")
+            print(f"[PATCH] Đã tự động vá tương thích transformers cho {model_file.name}")
+    except (OSError, UnicodeDecodeError):
+        pass
+
+
 def setup_xlm_roberta_capu(target_dir: Path) -> Path:
     """Tải và chuẩn bị mô hình dragonSwing/xlm-roberta-capu (~278M)."""
     print("=" * 60)
@@ -183,6 +214,7 @@ def setup_xlm_roberta_capu(target_dir: Path) -> Path:
     vocab_dir = target_dir / "vocabulary"
 
     if model_bin.exists() and model_bin.stat().st_size > 800_000_000 and vocab_dir.exists():
+        _patch_capu_compatibility(target_dir)
         print(f"[OK] Đã tồn tại pytorch_model.bin và vocabulary tại {target_dir}. Bỏ qua tải lại.")
         return target_dir
 
@@ -192,6 +224,8 @@ def setup_xlm_roberta_capu(target_dir: Path) -> Path:
         local_dir=str(target_dir),
         resume_download=True,
     )
+
+    _patch_capu_compatibility(target_dir)
 
     # Đảm bảo xlm-roberta-base tokenizer được cache sẵn cho chế độ offline
     try:

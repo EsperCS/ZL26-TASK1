@@ -331,8 +331,12 @@ class SherpaXLMPipeline:
         return recognizer
 
     def _init_capu_model(self, capu_dir: Path, device: str) -> Any:
-        """Nạp GecBERTModel từ repo dragonSwing/xlm-roberta-capu."""
+        """Nạp GecBERTModel từ repo dragonSwing/xlm-roberta-capu (kèm tự động vá tương thích transformers)."""
         abs_capu_dir = str(capu_dir.resolve())
+
+        # Tự động vá tương thích mã nguồn cũ của dragonSwing với transformers 4.40+ / 5.x
+        self._patch_capu_compatibility(capu_dir)
+
         if abs_capu_dir not in sys.path:
             sys.path.insert(0, abs_capu_dir)
 
@@ -349,6 +353,36 @@ class SherpaXLMPipeline:
         except Exception as e:  # noqa: BLE001
             print(f"[CẢNH BÁO] Không thể nạp GecBERTModel ({e}). Tạm tắt tầng Capu.")
             return None
+
+    @staticmethod
+    def _patch_capu_compatibility(capu_dir: Path) -> None:
+        """Tự động khắc phục tương thích mã nguồn cũ của dragonSwing/xlm-roberta-capu với transformers mới."""
+        model_file = capu_dir / "modeling_seq2labels.py"
+        if not model_file.exists():
+            return
+        try:
+            content = model_file.read_text(encoding="utf-8")
+            modified = False
+
+            if "@dataclass" not in content:
+                content = "from dataclasses import dataclass\n" + content
+                content = content.replace(
+                    "class Seq2LabelsOutput(ModelOutput):",
+                    "@dataclass\nclass Seq2LabelsOutput(ModelOutput):",
+                )
+                modified = True
+
+            if "mean_resizing=False" not in content and "self.bert.resize_token_embeddings(vocab_size + 1)" in content:
+                content = content.replace(
+                    "self.bert.resize_token_embeddings(vocab_size + 1)",
+                    "self.bert.resize_token_embeddings(vocab_size + 1, mean_resizing=False)",
+                )
+                modified = True
+
+            if modified:
+                model_file.write_text(content, encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            pass
 
     def segment_speech_with_vad(self, samples: np.ndarray, sample_rate: int = 16000) -> list[np.ndarray]:
         """
