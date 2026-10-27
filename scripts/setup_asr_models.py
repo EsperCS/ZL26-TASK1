@@ -72,7 +72,18 @@ def setup_phoasr_small(target_dir: Path) -> None:
 
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Ưu tiên convert trực tiếp bằng Python API (tránh lỗi lệch môi trường python trên Colab)
+    # 1. Đảm bảo ctranslate2 đã được cài đặt trong môi trường Python hiện hành
+    try:
+        import ctranslate2.converters
+    except ImportError:
+        print(f"[TỰ ĐỘNG] Thư viện ctranslate2 chưa có trong {sys.executable}. Đang tự động cài đặt...")
+        try:
+            subprocess.run([sys.executable, "-m", "pip", "install", "-U", "ctranslate2"], check=True)
+            import ctranslate2.converters
+        except (subprocess.SubprocessError, ImportError) as install_err:
+            print(f"[CẢNH BÁO] Không thể tự cài ctranslate2 qua pip: {install_err}")
+
+    # 2. Convert trực tiếp bằng Python API
     try:
         import ctranslate2.converters
 
@@ -91,7 +102,7 @@ def setup_phoasr_small(target_dir: Path) -> None:
     except (RuntimeError, ValueError, ImportError, OSError) as e:
         print(f"Không thể convert qua Python API ({e}), thử dùng fallback CLI...")
 
-    # 2. Fallback CLI
+    # 3. Fallback CLI
     cmd = [
         sys.executable,
         "-m",
