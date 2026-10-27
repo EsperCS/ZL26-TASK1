@@ -75,6 +75,45 @@ import polars as pl
 import torch
 
 
+def setup_cuda_libraries() -> None:
+    """Tìm và nạp sẵn các thư viện CUDA (libcublas.so.12, libcudnn) vào bộ nhớ tiến trình."""
+    if not sys.platform.startswith("linux"):
+        return
+
+    import ctypes
+    import glob
+    import os
+
+    candidate_dirs = [
+        "/usr/local/cuda/lib64",
+        "/usr/local/cuda-12/lib64",
+        "/usr/local/cuda-12.0/lib64",
+        "/usr/local/cuda-12.1/lib64",
+        "/usr/local/cuda-12.2/lib64",
+        "/usr/local/cuda-12.4/lib64",
+        "/usr/lib/x86_64-linux-gnu",
+    ]
+
+    for path_entry in sys.path:
+        nvidia_dir = os.path.join(path_entry, "nvidia")
+        if os.path.isdir(nvidia_dir):
+            candidate_dirs.extend(glob.glob(os.path.join(nvidia_dir, "*", "lib")))
+
+    valid_dirs = [d for d in candidate_dirs if os.path.isdir(d)]
+    if valid_dirs:
+        curr_ld = os.environ.get("LD_LIBRARY_PATH", "")
+        os.environ["LD_LIBRARY_PATH"] = ":".join(valid_dirs + [curr_ld]).strip(":")
+
+    mode = getattr(ctypes, "RTLD_GLOBAL", 0x100)
+    for c_dir in valid_dirs:
+        for pattern in ["libcublas.so.12*", "libcublasLt.so.12*", "libcudnn*.so*"]:
+            for lib_path in glob.glob(os.path.join(c_dir, pattern)):
+                with contextlib.suppress(Exception):
+                    ctypes.CDLL(lib_path, mode=mode)
+
+setup_cuda_libraries()
+
+
 def collect_audio_paths(data_dir: Path) -> list[str]:
     """
     Quét tất cả các file JSONL (train.jsonl, public_test.jsonl) trong data_dir
@@ -305,15 +344,40 @@ def main() -> None:
             continue
 
         try:
-            segments, info = model.transcribe(
-                str(actual_path),
-                vad_filter=True,
-                beam_size=5,
-                temperature=0.0,
-                language="vi",
-                without_timestamps=True,
-            )
-            text = " ".join(seg.text.strip() for seg in segments).strip()
+            try:
+                segments, info = model.transcribe(
+                    str(actual_path),
+                    vad_filter=True,
+                    beam_size=5,
+                    temperature=0.0,
+                    language="vi",
+                    without_timestamps=True,
+                )
+                seg_list = list(segments)
+            except RuntimeError as e:
+                if ("libcublas" in str(e).lower() or "cuda" in str(e).lower() or "cannot be loaded" in str(e).lower()) and args.device == "cuda":
+                    print(f"\n[TỰ ĐỘNG KHẮC PHỤC] Phát hiện lỗi CUDA ({e}). Tự động chuyển model sang CPU (int8)...")
+                    args.device = "cpu"
+                    args.compute_type = "int8"
+                    del model
+                    model = faster_whisper.WhisperModel(
+                        str(model_path),
+                        device="cpu",
+                        compute_type="int8",
+                    )
+                    segments, info = model.transcribe(
+                        str(actual_path),
+                        vad_filter=True,
+                        beam_size=5,
+                        temperature=0.0,
+                        language="vi",
+                        without_timestamps=True,
+                    )
+                    seg_list = list(segments)
+                else:
+                    raise
+
+            text = " ".join(seg.text.strip() for seg in seg_list).strip()
             duration = float(getattr(info, "duration", 0.0))
 
             cache_data[rel_path] = {
