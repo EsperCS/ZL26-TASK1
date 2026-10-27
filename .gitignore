@@ -11,6 +11,8 @@
 /train/
 /train+public_test
 /train+public_test/
+/public_test
+/public_test/
 *.zip
 
 # Python / Environment / venv
