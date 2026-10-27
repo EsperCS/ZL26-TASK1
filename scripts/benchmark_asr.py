@@ -43,6 +43,35 @@ if sys.stderr.encoding and sys.stderr.encoding.lower() != "utf-8":
     with contextlib.suppress(Exception):
         sys.stderr.reconfigure(encoding="utf-8")
 
+# Tự động phát hiện và cài đặt các thư viện phụ thuộc nếu còn thiếu trong môi trường Python
+def _ensure_dependencies() -> None:
+    import subprocess
+    required = {
+        "faster_whisper": "faster-whisper",
+        "ctranslate2": "ctranslate2",
+        "jiwer": "jiwer",
+        "torch": "torch",
+        "psutil": "psutil",
+    }
+    missing = []
+    for mod, pkg in required.items():
+        try:
+            __import__(mod)
+        except ImportError:
+            missing.append(pkg)
+    if missing:
+        print(f"[TỰ ĐỘNG CÀI ĐẶT] Thiếu thư viện trong {sys.executable}. Đang cài đặt: {missing}...")
+        try:
+            subprocess.run([sys.executable, "-m", "pip", "install", "-U"] + missing, check=True)
+        except (subprocess.SubprocessError, OSError):
+            with contextlib.suppress(Exception):
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "-U", "--break-system-packages"] + missing,
+                    check=True,
+                )
+
+_ensure_dependencies()
+
 # Khắc phục tương thích PyAV 19 (bỏ metadata_errors)
 with contextlib.suppress(Exception):
     import av
