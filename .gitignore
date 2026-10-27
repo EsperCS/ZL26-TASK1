@@ -1,0 +1,34 @@
+# User-specified ignores
+/data
+/data/
+/.agent
+/.agent/
+/.agents
+/.agents/
+
+# Datasets
+/train
+/train/
+/train+public_test
+/train+public_test/
+*.zip
+
+# Python / Environment / venv
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Testing & Linting cache
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE & OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
