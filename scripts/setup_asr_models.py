@@ -71,6 +71,27 @@ def setup_phoasr_small(target_dir: Path) -> None:
         return
 
     target_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Ưu tiên convert trực tiếp bằng Python API (tránh lỗi lệch môi trường python trên Colab)
+    try:
+        import ctranslate2.converters
+
+        print("Đang chuyển đổi trực tiếp qua CTranslate2 TransformersConverter (in-process)...")
+        converter = ctranslate2.converters.TransformersConverter(
+            model_name_or_path="Qualcomm-AI-Research/PhoASR-whisper-small",
+            copy_files=["tokenizer.json", "preprocessor_config.json"],
+        )
+        converter.convert(
+            output_dir=str(target_dir),
+            quantization="float16",
+            force=True,
+        )
+        print(f"[THÀNH CÔNG] PhoASR-whisper-small-ct2 đã convert xong tại: {target_dir}")
+        return
+    except (RuntimeError, ValueError, ImportError, OSError) as e:
+        print(f"Không thể convert qua Python API ({e}), thử dùng fallback CLI...")
+
+    # 2. Fallback CLI
     cmd = [
         sys.executable,
         "-m",
@@ -87,7 +108,6 @@ def setup_phoasr_small(target_dir: Path) -> None:
         "--force",
     ]
 
-    # Nếu có lệnh CLI ct2-transformers-converter trực tiếp
     ct2_cli = shutil.which("ct2-transformers-converter")
     if ct2_cli:
         cmd = [
@@ -104,7 +124,7 @@ def setup_phoasr_small(target_dir: Path) -> None:
             "--force",
         ]
 
-    print(f"Thực thi lệnh chuyển đổi: {' '.join(cmd)}")
+    print(f"Thực thi lệnh chuyển đổi CLI: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
     print(f"[THÀNH CÔNG] PhoASR-whisper-small-ct2 đã convert xong tại: {target_dir}")
 
