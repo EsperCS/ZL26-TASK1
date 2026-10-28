@@ -215,6 +215,47 @@ class CapuDataCollator:
         }
 
 
+def _ensure_pretrained_capu_ready(capu_dir: Path) -> None:
+    """Tự động kiểm tra, tải và vá tương thích dragonSwing/xlm-roberta-capu nếu chưa có sẵn."""
+    capu_dir.mkdir(parents=True, exist_ok=True)
+    model_file = capu_dir / "modeling_seq2labels.py"
+    vocab_dir = capu_dir / "vocabulary"
+    model_bin = capu_dir / "pytorch_model.bin"
+
+    if not model_file.exists() or not vocab_dir.exists() or not model_bin.exists():
+        print(f"[AUTO-DOWNLOAD] Đang tải mô hình 'dragonSwing/xlm-roberta-capu' về '{capu_dir.resolve()}'...")
+        from huggingface_hub import snapshot_download
+
+        snapshot_download(
+            repo_id="dragonSwing/xlm-roberta-capu",
+            local_dir=str(capu_dir),
+            resume_download=True,
+        )
+
+    # Tự động vá lỗi tương thích mã nguồn cũ với transformers 5.x
+    if model_file.exists():
+        try:
+            content = model_file.read_text(encoding="utf-8")
+            modified = False
+            if "@dataclass" not in content:
+                content = "from dataclasses import dataclass\n" + content
+                content = content.replace(
+                    "class Seq2LabelsOutput(ModelOutput):",
+                    "@dataclass\nclass Seq2LabelsOutput(ModelOutput):",
+                )
+                modified = True
+            if "mean_resizing=False" not in content and "self.bert.resize_token_embeddings(vocab_size + 1)" in content:
+                content = content.replace(
+                    "self.bert.resize_token_embeddings(vocab_size + 1)",
+                    "self.bert.resize_token_embeddings(vocab_size + 1, mean_resizing=False)",
+                )
+                modified = True
+            if modified:
+                model_file.write_text(content, encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            pass
+
+
 def train_capu_model(
     train_samples: list[tuple[list[str], list[str]]],
     pretrained_dir: Path,
@@ -226,6 +267,7 @@ def train_capu_model(
     dry_run: bool = False,
 ) -> None:
     """Vòng lặp huấn luyện Seq2LabelsModel với PyTorch / Mixed Precision."""
+    _ensure_pretrained_capu_ready(pretrained_dir)
     abs_pretrained = str(pretrained_dir.resolve())
     if abs_pretrained not in sys.path:
         sys.path.insert(0, abs_pretrained)
@@ -387,6 +429,7 @@ def evaluate_capu_comparison(
 
     # 1. Đánh giá Baseline Capu
     print("\n--- Đang chạy Baseline XLM-RoBERTa Capu ---")
+    _ensure_pretrained_capu_ready(base_capu_dir)
     pipe_base = SherpaXLMPipeline(
         model_name_or_dir=zipformer_dir,
         capu_model_dir=base_capu_dir,

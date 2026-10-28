@@ -218,16 +218,33 @@ def run_lora_training(
             "auto_find_batch_size": False,
         }
 
-    training_args = Seq2SeqTrainingArguments(
-        output_dir=str(tmp_adapter_dir),
-        warmup_ratio=0.1,
-        num_train_epochs=epochs,
-        logging_steps=10,
-        save_strategy="epoch",
-        save_total_limit=1,
-        report_to="none",
+    import inspect
+
+    sig = inspect.signature(Seq2SeqTrainingArguments.__init__)
+    valid_params = set(sig.parameters.keys())
+
+    eff_batch_size = gpu_cfg.get("per_device_train_batch_size", batch_size) * gpu_cfg.get("gradient_accumulation_steps", grad_accum)
+    total_steps = max(1, (len(train_dataset) // max(eff_batch_size, 1)) * epochs)
+    warmup_steps = max(1, int(total_steps * 0.1))
+
+    candidate_args: dict[str, Any] = {
+        "output_dir": str(tmp_adapter_dir),
+        "num_train_epochs": epochs,
+        "logging_steps": 10,
+        "save_strategy": "epoch",
+        "save_total_limit": 1,
+        "report_to": "none",
+        "remove_unused_columns": False,
         **gpu_cfg,
-    )
+    }
+
+    if "warmup_steps" in valid_params:
+        candidate_args["warmup_steps"] = warmup_steps
+    elif "warmup_ratio" in valid_params:
+        candidate_args["warmup_ratio"] = 0.1
+
+    filtered_args = {k: v for k, v in candidate_args.items() if k in valid_params}
+    training_args = Seq2SeqTrainingArguments(**filtered_args)
 
     trainer = Seq2SeqTrainer(
         args=training_args,
