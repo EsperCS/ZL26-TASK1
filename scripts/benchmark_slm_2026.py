@@ -270,10 +270,26 @@ class RealSLMRunner:
         if attention_mask is not None:
             attention_mask = attention_mask.to(self.model.device)
 
+        # Thu thập toàn bộ stop token IDs (đặc biệt <|im_end|> của ChatML) để dừng ngay khi xuất xong
+        stop_ids: list[int] = []
+        if self.tokenizer.eos_token_id is not None:
+            if isinstance(self.tokenizer.eos_token_id, list):
+                stop_ids.extend(self.tokenizer.eos_token_id)
+            else:
+                stop_ids.append(self.tokenizer.eos_token_id)
+
+        for stop_str in ["<|im_end|>", "<|endoftext|>", "</s>", "<end_of_turn>"]:
+            tid = self.tokenizer.convert_tokens_to_ids(stop_str)
+            if tid is not None and isinstance(tid, int) and tid > 0 and tid not in stop_ids:
+                stop_ids.append(tid)
+
+        # Giới hạn max_new_tokens hợp lý (Thinking: 512, Direct: 384) tránh sinh lặp vô tận
+        effective_max_tokens = min(max_new_tokens, 512 if thinking_mode else 384)
+
         gen_kwargs: dict[str, Any] = {
-            "max_new_tokens": max_new_tokens,
-            "pad_token_id": self.tokenizer.pad_token_id,
-            "eos_token_id": self.tokenizer.eos_token_id,
+            "max_new_tokens": effective_max_tokens,
+            "pad_token_id": self.tokenizer.pad_token_id or (stop_ids[0] if stop_ids else None),
+            "eos_token_id": stop_ids if len(stop_ids) > 1 else (stop_ids[0] if stop_ids else None),
         }
         if temperature > 0.0:
             gen_kwargs["do_sample"] = True
@@ -516,13 +532,13 @@ def run_benchmark(
                 )
                 sample_results.append(metric)
 
-                if idx == 1 or idx % 10 == 0 or idx == len(val_samples):
-                    print(
-                        f"  [{idx}/{len(val_samples)}] Match: {'ĐÚNG' if metric.state_hash_match else 'SAI'} | "
-                        f"Tools: {len(parsed_pred.tool_calls)} | "
-                        f"ThinkTok: {metric.thinking_tokens} | Lat: {lat_ms:.0f}ms",
-                        flush=True,
-                    )
+                # In kết quả từng mẫu realtime để theo dõi trên console
+                print(
+                    f"  [{idx}/{len(val_samples)}] Match: {'ĐÚNG' if metric.state_hash_match else 'SAI'} | "
+                    f"Tools: {len(parsed_pred.tool_calls)} | "
+                    f"ThinkTok: {metric.thinking_tokens} | Lat: {lat_ms:.0f}ms",
+                    flush=True,
+                )
 
                 # Lưu vết ca đối chứng Thinking vs No-Thinking cho Qwen3.5-4B
                 if input_mode == "Real ASR Mode" and "Qwen3.5-4B" in cand.name:
