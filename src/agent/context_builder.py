@@ -198,6 +198,7 @@ class ContextBuilder:
         context: dict[str, Any],
         transcript: str = "",
         history: list[dict[str, Any]] | None = None,
+        thinking_mode: bool = False,
     ) -> str:
         """Sinh System Prompt chuẩn mực cho SLM kèm bảng lịch và công cụ khả dụng."""
         current_time = context.get("current_time", datetime.now().isoformat())
@@ -229,6 +230,16 @@ class ContextBuilder:
         # 3. Danh mục công cụ được phép gọi
         allowed_tools_spec = self._format_allowed_tools(installed_apps)
 
+        thinking_guideline = (
+            "### HƯỚNG DẪN ĐỊNH DẠNG (FORMAT GUIDELINES):\n"
+            "- BẠN ĐƯỢC PHÉP suy luận từng bước bên trong thẻ `<think>...</think>` trước khi xuất kết quả để phân tích yêu cầu, kiểm tra lịch và sửa lỗi nghe nhầm của ASR.\n"
+            "- Sau thẻ `</think>`, bắt buộc kết thúc bằng DUY NHẤT một khối JSON chứa `tool_calls`.\n"
+            if thinking_mode
+            else "### HƯỚNG DẪN ĐỊNH DẠNG (FORMAT GUIDELINES):\n"
+            "- Tuyệt đối KHÔNG suy luận, không dùng thẻ `<think>`, không thêm bất kỳ văn bản nào ngoài khối JSON.\n"
+            "- Xuất DUY NHẤT một khối JSON chứa `tool_calls`.\n"
+        )
+
         return (
             "Bạn là Trợ lý cuộc sống thông minh LifeMate (Zalo AI Challenge 2026).\n"
             "Nhiệm vụ của bạn là lắng nghe yêu cầu bằng giọng nói của người dùng tiếng Việt, lập kế hoạch và chuyển thành chuỗi các lệnh gọi công cụ (tool_calls) chính xác.\n"
@@ -242,7 +253,8 @@ class ContextBuilder:
             "6. THIẾU THÔNG TIN: Nếu người dùng yêu cầu hành động nhưng thiếu tham số cốt lõi mà không thể tra cứu, hãy gọi `sys.ask_missing_info`.\n"
             "7. ĐỊNH DẠNG THỜI GIAN: Bắt buộc tuân thủ format (date: `YYYY-MM-DD`, date-time: `YYYY-MM-DDTHH:MM:SS+07:00`, time: `HH:MM`).\n"
             "\n"
-            "### ĐỊNH DẠNG ĐẦU RA (OUTPUT FORMAT):\n"
+            f"{thinking_guideline}"
+            "\n### ĐỊNH DẠNG ĐẦU RA (OUTPUT FORMAT):\n"
             "Bạn phải xuất ra DUY NHẤT một khối JSON hợp lệ theo cấu trúc sau:\n"
             "```json\n"
             "{\n"
@@ -330,6 +342,7 @@ class ContextBuilder:
         self,
         sample: dict[str, Any],
         transcript_override: str | None = None,
+        thinking_mode: bool = False,
     ) -> list[dict[str, Any]]:
         """Xây dựng chuỗi messages chuẩn ChatML cho toàn bộ cuộc hội thoại của sample."""
         transcript = transcript_override or sample.get("audio_text", "")
@@ -341,6 +354,7 @@ class ContextBuilder:
             context=context,
             transcript=transcript,
             history=history,
+            thinking_mode=thinking_mode,
         )
 
         messages: list[dict[str, Any]] = [

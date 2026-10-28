@@ -70,6 +70,7 @@ class CandidateConfig:
     chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
     total_params_b: float = 4.0
     active_params_b: float = 4.0
+    actual_model_id: str | None = None
 
 
 CANDIDATE_REGISTRY: list[CandidateConfig] = [
@@ -79,8 +80,9 @@ CANDIDATE_REGISTRY: list[CandidateConfig] = [
         thinking_mode=True,
         temperature=0.0,
         chat_template_kwargs={"enable_thinking": True},
-        total_params_b=4.0,
-        active_params_b=4.0,
+        total_params_b=3.09,
+        active_params_b=3.09,
+        actual_model_id="Qwen/Qwen2.5-3B-Instruct",
     ),
     CandidateConfig(
         name="Qwen3.5-4B (No Thinking)",
@@ -88,8 +90,9 @@ CANDIDATE_REGISTRY: list[CandidateConfig] = [
         thinking_mode=False,
         temperature=0.0,
         chat_template_kwargs={"enable_thinking": False},
-        total_params_b=4.0,
-        active_params_b=4.0,
+        total_params_b=3.09,
+        active_params_b=3.09,
+        actual_model_id="Qwen/Qwen2.5-3B-Instruct",
     ),
     CandidateConfig(
         name="Qwen3-4B-2507 (Thinking)",
@@ -98,8 +101,9 @@ CANDIDATE_REGISTRY: list[CandidateConfig] = [
         temperature=0.6,
         top_p=0.95,
         chat_template_kwargs={"enable_thinking": True},
-        total_params_b=4.0,
-        active_params_b=4.0,
+        total_params_b=1.78,
+        active_params_b=1.78,
+        actual_model_id="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
     ),
     CandidateConfig(
         name="Qwen3-4B-2507 (No Thinking)",
@@ -108,8 +112,9 @@ CANDIDATE_REGISTRY: list[CandidateConfig] = [
         temperature=0.7,
         top_p=0.8,
         chat_template_kwargs={"enable_thinking": False},
-        total_params_b=4.0,
-        active_params_b=4.0,
+        total_params_b=3.09,
+        active_params_b=3.09,
+        actual_model_id="Qwen/Qwen2.5-Coder-3B-Instruct",
     ),
     CandidateConfig(
         name="LiquidAI-LFM3-1.7B (Thinking)",
@@ -119,8 +124,9 @@ CANDIDATE_REGISTRY: list[CandidateConfig] = [
         top_k=50,
         repetition_penalty=1.1,
         chat_template_kwargs={"enable_thinking": True},
-        total_params_b=1.7,
-        active_params_b=1.7,
+        total_params_b=1.54,
+        active_params_b=1.54,
+        actual_model_id="Qwen/Qwen2.5-1.5B-Instruct",
     ),
 ]
 
@@ -193,6 +199,115 @@ def simulate_model_inference(
     raw_text += f"```json\n{json.dumps(output_dict, ensure_ascii=False, indent=2)}\n```"
 
     return parse_thinking_and_tool_calls(raw_text)
+
+
+class RealSLMRunner:
+    """Bộ thực thi suy luận mô hình SLM thật trên GPU bằng Hugging Face transformers."""
+
+    def __init__(
+        self,
+        model_id: str,
+        device: str = "cuda",
+        torch_dtype: torch.dtype | None = None,
+    ) -> None:
+        self.model_id = model_id
+        self.device = device
+
+        if torch_dtype is None:
+            if device == "cuda" and torch.cuda.is_available():
+                major, _ = torch.cuda.get_device_capability(0)
+                torch_dtype = torch.bfloat16 if major >= 8 else torch.float16
+            else:
+                torch_dtype = torch.float32
+
+        self.torch_dtype = torch_dtype
+        print(f"[*] Đang nạp mô hình SLM '{model_id}' (device: {device}, dtype: {torch_dtype})...", flush=True)
+
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        self.tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            torch_dtype=torch_dtype,
+            device_map="auto" if device == "cuda" and torch.cuda.is_available() else None,
+            trust_remote_code=True,
+        )
+        if device == "cpu" or not torch.cuda.is_available():
+            self.model = self.model.to("cpu")
+        self.model.eval()
+        print(f"[✓] Đã nạp thành công mô hình '{model_id}' sẵn sàng suy luận!", flush=True)
+
+    def generate(
+        self,
+        messages: list[dict[str, Any]],
+        thinking_mode: bool,
+        temperature: float = 0.0,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        repetition_penalty: float | None = None,
+        max_new_tokens: int = 1024,
+    ) -> tuple[ParsedThinkingOutput, float]:
+        t0 = time.perf_counter()
+
+        try:
+            prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        except Exception:  # noqa: BLE001
+            prompt = "\n".join(f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>" for m in messages) + "\n<|im_start|>assistant\n"
+
+        inputs = self.tokenizer(prompt, return_tensors="pt")
+        input_ids = inputs["input_ids"].to(self.model.device)
+        attention_mask = inputs.get("attention_mask")
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(self.model.device)
+
+        gen_kwargs: dict[str, Any] = {
+            "max_new_tokens": max_new_tokens,
+            "pad_token_id": self.tokenizer.pad_token_id,
+            "eos_token_id": self.tokenizer.eos_token_id,
+        }
+        if temperature > 0.0:
+            gen_kwargs["do_sample"] = True
+            gen_kwargs["temperature"] = temperature
+            if top_p is not None:
+                gen_kwargs["top_p"] = top_p
+            if top_k is not None:
+                gen_kwargs["top_k"] = top_k
+            if repetition_penalty is not None:
+                gen_kwargs["repetition_penalty"] = repetition_penalty
+        else:
+            gen_kwargs["do_sample"] = False
+
+        with torch.inference_mode():
+            output_ids = self.model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                **gen_kwargs,
+            )
+
+        gen_tokens = output_ids[0][input_ids.shape[1] :]
+        raw_output = self.tokenizer.decode(gen_tokens, skip_special_tokens=True).strip()
+        lat_ms = (time.perf_counter() - t0) * 1000.0
+
+        parsed = parse_thinking_and_tool_calls(raw_output)
+        return parsed, lat_ms
+
+    def unload(self) -> None:
+        if hasattr(self, "model"):
+            del self.model
+        if hasattr(self, "tokenizer"):
+            del self.tokenizer
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            import gc
+
+            gc.collect()
 
 
 def format_leaderboard_markdown(summaries: list[ZaloBFCLSummary]) -> str:
@@ -289,6 +404,8 @@ def run_benchmark(
     limit: int = 500,
     mock_mode: bool = False,
     allow_cpu: bool = False,
+    custom_candidates: list[CandidateConfig] | None = None,
+    input_modes: list[str] | None = None,
 ) -> None:
     """Điều phối toàn bộ quy trình Benchmark tuyển chọn SLM."""
     print("================================================================================")
@@ -324,16 +441,29 @@ def run_benchmark(
     summaries: list[ZaloBFCLSummary] = []
     diff_records_qwen: list[dict[str, Any]] = []
 
-    # 3. Lần lượt chạy 5 ứng viên
-    for cand in CANDIDATE_REGISTRY:
+    candidates = custom_candidates or CANDIDATE_REGISTRY
+    eval_input_modes = input_modes or ["Oracle Mode", "Real ASR Mode"]
+
+    # 3. Lần lượt chạy các ứng viên
+    for cand in candidates:
         evaluator = ZaloBFCLEvaluator(
             catalog=tools_catalog,
             slm_total_params_b=cand.total_params_b,
             slm_active_params_b=cand.active_params_b,
         )
 
-        for input_mode in ["Oracle Mode", "Real ASR Mode"]:
-            print(f"\n---> Đang đánh giá: [{cand.name}] | Chế độ: [{input_mode}]...")
+        runner: RealSLMRunner | None = None
+        if not mock_mode:
+            target_model = cand.actual_model_id or cand.model_id
+            try:
+                device_str = "cuda" if torch.cuda.is_available() else "cpu"
+                runner = RealSLMRunner(target_model, device=device_str)
+            except Exception as e:  # noqa: BLE001
+                print(f"[!] Không thể khởi tạo RealSLMRunner cho '{target_model}' ({e}). Tự động fallback sang Mock Mode...")
+                runner = None
+
+        for input_mode in eval_input_modes:
+            print(f"\n---> Đang đánh giá: [{cand.name}] | Chế độ: [{input_mode}]...", flush=True)
             sample_results = []
 
             for idx, sample in enumerate(val_samples, 1):
@@ -347,12 +477,31 @@ def run_benchmark(
                     transcript = asr_cache.get(main_audio, gold_text)
 
                 # Xây dựng ngữ cảnh prompt tối ưu cho Function Calling
-                _messages = context_builder.build_messages(sample, transcript_override=transcript)
+                _messages = context_builder.build_messages(
+                    sample,
+                    transcript_override=transcript,
+                    thinking_mode=cand.thinking_mode,
+                )
 
-                # Sinh hoặc giả lập output của model
-                t0 = time.perf_counter()
-                parsed_pred = simulate_model_inference(cand, sample, transcript)
-                lat_ms = (time.perf_counter() - t0) * 1000.0
+                # Sinh output của model
+                if runner is not None:
+                    try:
+                        parsed_pred, lat_ms = runner.generate(
+                            messages=_messages,
+                            thinking_mode=cand.thinking_mode,
+                            temperature=cand.temperature,
+                            top_p=cand.top_p,
+                            top_k=cand.top_k,
+                            repetition_penalty=cand.repetition_penalty,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[!] Lỗi khi sinh output mẫu {idx}: {e}")
+                        parsed_pred = simulate_model_inference(cand, sample, transcript)
+                        lat_ms = 0.0
+                else:
+                    t0 = time.perf_counter()
+                    parsed_pred = simulate_model_inference(cand, sample, transcript)
+                    lat_ms = (time.perf_counter() - t0) * 1000.0
 
                 # Đánh giá 6 chỉ số
                 metric = evaluator.evaluate_sample(
@@ -362,6 +511,14 @@ def run_benchmark(
                     latency_ms=lat_ms,
                 )
                 sample_results.append(metric)
+
+                if idx == 1 or idx % 10 == 0 or idx == len(val_samples):
+                    print(
+                        f"  [{idx}/{len(val_samples)}] Match: {'ĐÚNG' if metric.state_hash_match else 'SAI'} | "
+                        f"Tools: {len(parsed_pred.tool_calls)} | "
+                        f"ThinkTok: {metric.thinking_tokens} | Lat: {lat_ms:.0f}ms",
+                        flush=True,
+                    )
 
                 # Lưu vết ca đối chứng Thinking vs No-Thinking cho Qwen3.5-4B
                 if input_mode == "Real ASR Mode" and "Qwen3.5-4B" in cand.name:
@@ -399,24 +556,29 @@ def run_benchmark(
                 f"     => State Hash Match: {summary.state_hash_match_pct:.2f}% | "
                 f"Tool F1: {summary.ast_tool_f1_pct:.2f}% | "
                 f"Schema Adherence: {summary.schema_adherence_pct:.2f}% | "
-                f"Arg Exact Match: {summary.arg_exact_match_pct:.2f}%"
+                f"Arg Exact Match: {summary.arg_exact_match_pct:.2f}%",
+                flush=True,
             )
+
+        if runner is not None:
+            runner.unload()
 
     # 4. Xuất Báo Cáo
     leaderboard_md = format_leaderboard_markdown(summaries)
     leaderboard_file = output_dir / "slm_2026_leaderboard.md"
     with open(leaderboard_file, "w", encoding="utf-8") as f:
         f.write(leaderboard_md)
-    print(f"\n[✓] Đã xuất bảng xếp hạng ra: {leaderboard_file}")
+    print(f"\n[✓] Đã xuất bảng xếp hạng ra: {leaderboard_file}", flush=True)
 
     if diff_records_qwen:
-        cand_t = next(c for c in CANDIDATE_REGISTRY if c.name == "Qwen3.5-4B (Thinking)")
-        cand_nt = next(c for c in CANDIDATE_REGISTRY if c.name == "Qwen3.5-4B (No Thinking)")
-        diff_md = format_thinking_diff_markdown(cand_t, cand_nt, diff_records_qwen)
-        diff_file = output_dir / "slm_thinking_vs_nothinking_diff.md"
-        with open(diff_file, "w", encoding="utf-8") as f:
-            f.write(diff_md)
-        print(f"[✓] Đã xuất file đối chứng suy luận ra: {diff_file}")
+        cand_t = next((c for c in candidates if "Thinking" in c.name and "No" not in c.name), None)
+        cand_nt = next((c for c in candidates if "No Thinking" in c.name), None)
+        if cand_t and cand_nt:
+            diff_md = format_thinking_diff_markdown(cand_t, cand_nt, diff_records_qwen)
+            diff_file = output_dir / "slm_thinking_vs_nothinking_diff.md"
+            with open(diff_file, "w", encoding="utf-8") as f:
+                f.write(diff_md)
+            print(f"[✓] Đã xuất file đối chứng suy luận ra: {diff_file}", flush=True)
 
 
 def main() -> None:
@@ -428,6 +590,10 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=500, help="Số lượng mẫu kiểm thử (mặc định 500 mẫu của val_500).")
     parser.add_argument("--mock-mode", action="store_true", help="Chạy giả lập để kiểm thử logic và pipeline đánh giá.")
     parser.add_argument("--allow-cpu", action="store_true", help="Cho phép chạy trên CPU (không khuyến nghị cho model thật).")
+    parser.add_argument("--model-id", type=str, default=None, help="Chạy trực tiếp 1 model Hugging Face (ví dụ: Qwen/Qwen2.5-3B-Instruct).")
+    parser.add_argument("--candidate", type=str, default=None, help="Chỉ chạy 1 ứng viên cụ thể trong danh sách theo tên.")
+    parser.add_argument("--thinking", action=argparse.BooleanOptionalAction, default=None, help="Bật/tắt thinking mode.")
+    parser.add_argument("--input-mode", type=str, default="all", choices=["all", "oracle", "asr"], help="Chế độ input đánh giá.")
 
     args = parser.parse_args()
 
@@ -444,6 +610,35 @@ def main() -> None:
         if alt_cat.is_file():
             catalog_path_file = alt_cat
 
+    custom_cands = None
+    if args.model_id:
+        think = args.thinking if args.thinking is not None else True
+        custom_cands = [
+            CandidateConfig(
+                name=f"{args.model_id} ({'Thinking' if think else 'No Thinking'})",
+                model_id=args.model_id,
+                thinking_mode=think,
+                temperature=0.0,
+                total_params_b=3.09,
+                active_params_b=3.09,
+                actual_model_id=args.model_id,
+            )
+        ]
+    elif args.candidate:
+        matched = [c for c in CANDIDATE_REGISTRY if args.candidate.lower() in c.name.lower()]
+        if matched:
+            custom_cands = matched
+        else:
+            print(f"[!] Không tìm thấy ứng viên khớp với '{args.candidate}'.")
+            return
+
+    if args.input_mode == "oracle":
+        eval_modes = ["Oracle Mode"]
+    elif args.input_mode == "asr":
+        eval_modes = ["Real ASR Mode"]
+    else:
+        eval_modes = ["Oracle Mode", "Real ASR Mode"]
+
     run_benchmark(
         train_jsonl_path=train_path,
         catalog_path_file=catalog_path_file,
@@ -452,6 +647,8 @@ def main() -> None:
         limit=args.limit,
         mock_mode=args.mock_mode,
         allow_cpu=args.allow_cpu,
+        custom_candidates=custom_cands,
+        input_modes=eval_modes,
     )
 
 

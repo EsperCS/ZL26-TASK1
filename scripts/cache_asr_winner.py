@@ -277,16 +277,27 @@ def run_cache_asr(
     zipformer_path = REPO_ROOT / "models" / "asr" / "zipformer-150m"
     vad_path = REPO_ROOT / "models" / "asr" / "vad" / "silero_vad.onnx"
     hotwords_path = REPO_ROOT / "models" / "asr" / "zalo_hotwords.txt"
-    capu_path = REPO_ROOT / "models" / "asr" / "xlm-roberta-capu-zalo-ft"
+    
+    # Tự động tìm kiếm checkpoint Capu Fine-Tuned (ưu tiên Drive hoặc thư mục cục bộ)
+    capu_candidates = [
+        REPO_ROOT / "models" / "asr" / "xlm-roberta-capu-zalo-ft",
+        Path("/content/drive/MyDrive/ZaloAI_2026_ASR/xlm-roberta-capu-zalo-ft"),
+        Path("/content/xlm-roberta-capu-zalo-ft"),
+        REPO_ROOT / "models" / "asr" / "xlm-roberta-capu",
+    ]
+    capu_path = next((p for p in capu_candidates if p.is_dir()), None)
+    if capu_path:
+        print(f"[+] Đã tìm thấy thư mục Capu: {capu_path}")
 
-    print(f"[*] Đang khởi tạo SherpaXLMPipeline (Model: {zipformer_path.name}, Device: {device})...")
+    print(f"[*] Đang khởi tạo SherpaXLMPipeline (Model: {zipformer_path.name}, Device: {device})...", flush=True)
     pipeline = SherpaXLMPipeline(
         model_name_or_dir=str(zipformer_path),
         vad_model_path=str(vad_path),
         hotwords_file=str(hotwords_path) if hotwords_path.is_file() else None,
-        capu_model_dir=str(capu_path) if capu_path.is_dir() else None,
+        capu_model_dir=str(capu_path) if capu_path else None,
         hotwords_score=1.5,
         device=device,
+        provider=device,
     )
 
     records_list = list(cache.values())
@@ -321,7 +332,7 @@ def run_cache_asr(
             records_list.append(entry)
             processed_count += 1
 
-            if processed_count % 10 == 0 or idx == len(remaining_tasks):
+            if processed_count == 1 or processed_count % 10 == 0 or idx == len(remaining_tasks):
                 elapsed = time.perf_counter() - t_start
                 avg_time = elapsed / processed_count
                 rem_time = (len(remaining_tasks) - processed_count) * avg_time
@@ -329,12 +340,13 @@ def run_cache_asr(
                     f"[{idx}/{len(remaining_tasks)}] Audio: {rel_audio_path} | "
                     f"Trans: \"{res.final_text[:50]}...\" | "
                     f"RTF: {dur / max(res.duration_sec, 0.01):.3f}x | "
-                    f"ETA: {rem_time / 60:.1f}m"
+                    f"ETA: {rem_time / 60:.1f}m",
+                    flush=True,
                 )
 
             # Checkpoint định kỳ
             if processed_count % checkpoint_interval == 0:
-                print(f"[+] Lưu checkpoint định kỳ ({len(records_list)} mẫu)...")
+                print(f"[+] Lưu checkpoint định kỳ ({len(records_list)} mẫu)...", flush=True)
                 save_checkpoint(records_list, output_parquet, checkpoint_json)
 
         except (OSError, RuntimeError, ValueError) as e:
