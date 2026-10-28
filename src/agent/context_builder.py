@@ -11,6 +11,7 @@ Tối ưu hóa ngữ cảnh suy luận cho Small Language Models (< 5B parameter
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timedelta
 from typing import Any
@@ -195,82 +196,54 @@ class ContextBuilder:
 
     def build_system_prompt(
         self,
-        context: dict[str, Any],
+        context: dict[str, Any] | None = None,
         transcript: str = "",
         history: list[dict[str, Any]] | None = None,
         thinking_mode: bool = False,
     ) -> str:
-        """Sinh System Prompt chuẩn mực cho SLM kèm bảng lịch và công cụ khả dụng."""
-        current_time = context.get("current_time", datetime.now().isoformat())
-        timezone_str = context.get("timezone", "Asia/Ho_Chi_Minh")
-        user_profile = context.get("user_profile", {})
-        installed_apps = context.get("installed_apps", {})
-
-        # 1. Bảng lịch 21 ngày
-        calendar_section = ""
-        if self.include_calendar_table:
-            cal_table = build_calendar_table(current_time)
-            calendar_section = (
-                f"\n### BẢNG QUY CHIẾU LỊCH 21 NGÀY (Từ current_time: `{current_time}`):\n"
-                f"{cal_table}\n"
-            )
-
-        # 2. Gợi ý Entity Grounding
-        entity_hints_section = ""
-        if self.enable_fuzzy_grounding and transcript:
-            groundings = fuzzy_entity_grounding(transcript, user_profile, history)
-            if groundings:
-                hints_text = "\n".join([f"- Nghe trong audio: \"{g[0]}\" ──► Thực thể chuẩn hồ sơ: **\"{g[1]}\"** (Khớp {g[2]}%)" for g in groundings[:5]])
-                entity_hints_section = (
-                    f"\n### GỢI Ý THỰC THỂ KHỚP HỒ SƠ (ASR-Entity Grounding):\n"
-                    f"{hints_text}\n"
-                    "Lưu ý: Hãy ưu tiên sử dụng tên thực thể chuẩn hồ sơ khi điền tham số Tool.\n"
-                )
-
-        # 3. Danh mục công cụ được phép gọi
-        allowed_tools_spec = self._format_allowed_tools(installed_apps)
-
-        thinking_guideline = (
-            "### HƯỚNG DẪN ĐỊNH DẠNG (FORMAT GUIDELINES):\n"
-            "- BẠN ĐƯỢC PHÉP suy luận từng bước bên trong thẻ `<think>...</think>` trước khi xuất kết quả để phân tích yêu cầu, kiểm tra lịch và sửa lỗi nghe nhầm của ASR.\n"
-            "- Sau thẻ `</think>`, bắt buộc kết thúc bằng DUY NHẤT một khối JSON chứa `tool_calls`.\n"
+        """Mẫu SYSTEM PROMPT đóng vai trò Luật Cứng & Định dạng Đầu ra."""
+        thinking_instruction = (
+            "Trong phần <think>, hãy kiểm tra nhanh: (1) Tên thực thể/ID trong hồ sơ, "
+            "(2) Ngày giờ quy đổi từ bảng lịch, (3) Điều kiện x-one-of/x-ref trong dưới 150 từ, "
+            "sau đó đóng thẻ </think> và xuất thẳng JSON."
             if thinking_mode
-            else "### HƯỚNG DẪN ĐỊNH DẠNG (FORMAT GUIDELINES):\n"
-            "- Tuyệt đối KHÔNG suy luận, không dùng thẻ `<think>`, không thêm bất kỳ văn bản nào ngoài khối JSON.\n"
-            "- Xuất DUY NHẤT một khối JSON chứa `tool_calls`.\n"
+            else "Tuyệt đối không dùng thẻ <think>, giữ trường `brief_plan` (15–20 từ) ở đầu JSON "
+            "làm bước đệm suy luận (Micro Chain-of-Thought), sau đó xuất `tool_calls`."
         )
 
         return (
-            "Bạn là Trợ lý cuộc sống thông minh LifeMate (Zalo AI Challenge 2026).\n"
-            "Nhiệm vụ của bạn là lắng nghe yêu cầu bằng giọng nói của người dùng tiếng Việt, lập kế hoạch và chuyển thành chuỗi các lệnh gọi công cụ (tool_calls) chính xác.\n"
-            "\n"
-            "### QUY TẮC BẮT BUỘC (CRITICAL RULES):\n"
-            "1. CHỈ ĐƯỢC GỌI CÁC CÔNG CỤ THUỘC ỨNG DỤNG ĐÃ CÀI ĐẶT (Installed Apps) hoặc `sys.ask_missing_info`.\n"
-            "2. NẾU YÊU CẦU NẰM NGOÀI PHẠM VI (Out-of-scope) hoặc ứng dụng liên quan chưa cài đặt, trả về danh sách rỗng: `\"tool_calls\": []`.\n"
-            "3. THAM SỐ BẮT BUỘC (required): Phải điền đầy đủ. Tuyệt đối không truyền chuỗi rỗng `\"\"` hoặc `null` cho tham số bắt buộc.\n"
-            "4. RÀNG BUỘC `x-one-of`: Phải chọn ĐÚNG 1 nhóm tham số được phép trong nhóm (ví dụ: `contact_id` HOẶC `phone_number`, không được truyền cả hai và không được bỏ trống cả hai).\n"
-            "5. RÀNG BUỘC `x-ref`: Tuyệt đối không bịa đặt ID (như `event_id`, `device_id`, `contact_id`). Nếu cần thao tác mà chưa có ID, hãy gọi tool tìm kiếm/đọc (`list`, `get`, `search`) trước.\n"
-            "6. THIẾU THÔNG TIN: Nếu người dùng yêu cầu hành động nhưng thiếu tham số cốt lõi mà không thể tra cứu, hãy gọi `sys.ask_missing_info`.\n"
-            "7. ĐỊNH DẠNG THỜI GIAN: Bắt buộc tuân thủ format (date: `YYYY-MM-DD`, date-time: `YYYY-MM-DDTHH:MM:SS+07:00`, time: `HH:MM`).\n"
-            "\n"
-            f"{thinking_guideline}"
-            "\n### ĐỊNH DẠNG ĐẦU RA (OUTPUT FORMAT):\n"
-            "Bạn phải xuất ra DUY NHẤT một khối JSON hợp lệ theo cấu trúc sau:\n"
+            "Bạn là LifeMate — trợ lý ảo điều hành công cụ thông minh. Nhiệm vụ của bạn là phân tích "
+            "yêu cầu bằng giọng nói của người dùng (đã qua nhận diện ASR) cùng ngữ cảnh cá nhân để gọi "
+            "chính xác chuỗi hàm (tools) tương ứng làm thay đổi trạng thái hệ thống (ToolEnv).\n\n"
+            "### QUY TẮC BẮT BUỘC (HARD RULES):\n"
+            "1. XỬ LÝ NHIỄU ASR & TÊN RIÊNG (ENTITY GROUNDING):\n"
+            "   - Văn bản đầu vào được chuyển từ giọng nói nên có thể sai chính tả hoặc đồng âm (ví dụ: \"sếp Dụng\" -> \"Sếp Dũng\").\n"
+            "   - BẮT BUỘC đối chiếu và lấy chính xác 100% tên người, số điện thoại, email, địa điểm hoặc ID sự kiện từ [USER PROFILE], [ENTITY HINTS] hoặc [CONVERSATION HISTORY]. Tuyệt đối không tự bịa (hallucinate) ID hoặc tên không tồn tại.\n\n"
+            "2. QUY CHIẾU THỜI GIAN TUYỆT ĐỐI (DATE & TIME RESOLUTION):\n"
+            "   - Dựa vào [CURRENT TIME] và [CALENDAR TABLE 21 DAYS] được cung cấp sẵn để quy đổi các từ chỉ thời gian tương đối (\"hôm nay\", \"ngày mai\", \"thứ sáu tuần này\", \"tuần sau\", \"9 rưỡi tối\") sang định dạng chuẩn của schema (ví dụ: YYYY-MM-DD, HH:MM).\n"
+            "   - Không tự nhẩm tính thứ/ngày ngoài bảng lịch đã cho.\n\n"
+            "3. TUÂN THỦ NGHIÊM NGẶT RÀNG BUỘC SCHEMA:\n"
+            "   - `required`: Phải điền đầy đủ mọi tham số bắt buộc. Tuyệt đối không truyền chuỗi rỗng \"\" hoặc null cho tham số bắt buộc.\n"
+            "   - `x-one-of`: Chỉ được phép truyền ĐÚNG MỘT trong các nhóm tham số được liệt kê trong ràng buộc `x-one-of`, tuyệt đối không truyền đồng thời cả hai.\n"
+            "   - `x-ref`: Khi một tham số yêu cầu tham chiếu (`x-ref`) tới đối tượng khác (như `contact_id`, `event_id`, `alarm_id`), phải lấy đúng ID từ [USER PROFILE], kết quả trả về của tool trước đó trong [CONVERSATION HISTORY], hoặc gọi hàm tìm kiếm/liệt kê trước khi cập nhật/xóa.\n\n"
+            "4. THỨ TỰ & ĐỊNH DẠNG ĐẦU RA:\n"
+            "   - Chỉ gọi các hàm thực sự cần thiết theo đúng thứ tự logic. Nếu yêu cầu có nhiều ý độc lập (ví dụ: vừa đặt báo thức vừa nhắn tin), hãy xuất đầy đủ các tool calls tương ứng.\n"
+            "   - Nếu yêu cầu nằm ngoài phạm vi hoặc công cụ liên quan chưa được cài đặt, xuất ra danh sách rỗng: `\"tool_calls\": []`.\n"
+            "   - Xuất kết quả dưới dạng JSON chuẩn theo cấu trúc:\n"
             "```json\n"
             "{\n"
-            "  \"brief_plan\": \"1 câu tóm tắt kế hoạch ngắn gọn\",\n"
+            "  \"brief_plan\": \"<Tóm tắt ngắn gọn: dùng hàm nào, ngày giờ gì quy đổi ra sao>\",\n"
             "  \"tool_calls\": [\n"
-            "    {\"name\": \"app_name.tool_name\", \"arguments\": {\"param1\": \"value1\"}}\n"
+            "    {\n"
+            "      \"name\": \"<tên_hàm_chính_xác>\",\n"
+            "      \"arguments\": {\n"
+            "        \"<tên_tham_số>\": \"<giá_trị>\"\n"
+            "      }\n"
+            "    }\n"
             "  ]\n"
             "}\n"
-            "```\n"
-            f"\n### THÔNG TIN BỐI CẢNH NGƯỜI DÙNG:\n"
-            f"- Thời gian hiện tại: `{current_time}` (Múi giờ: `{timezone_str}`)\n"
-            f"- Hồ sơ người dùng: {user_profile}\n"
-            f"{calendar_section}"
-            f"{entity_hints_section}"
-            f"\n### CÁC CÔNG CỤ KHẢ DỤNG:\n"
-            f"{allowed_tools_spec}\n"
+            "```\n\n"
+            f"{thinking_instruction}"
         )
 
     def _format_allowed_tools(self, installed_apps: dict[str, Any]) -> str:
@@ -338,61 +311,137 @@ class ContextBuilder:
 
         return "\n\n".join(output_blocks)
 
+    def build_user_prompt(
+        self,
+        sample: dict[str, Any],
+        transcript_override: str | None = None,
+        alt_transcript: str | None = None,
+    ) -> str:
+        """Định dạng User Prompt theo các khối [BLOCK] rõ ràng, nạp ngữ cảnh động cho từng mẫu."""
+        transcript = transcript_override or sample.get("audio_text", "")
+        context = sample.get("context", {})
+        current_time = context.get("current_time", datetime.now().isoformat())
+        user_profile = context.get("user_profile", {})
+        installed_apps = context.get("installed_apps", {})
+        history = sample.get("history", [])
+
+        # 1. [CURRENT TIME]
+        try:
+            curr_dt = date_parser.isoparse(current_time)
+            weekday_str = VI_WEEKDAYS[curr_dt.date().weekday()]
+            time_display = f"{curr_dt.strftime('%Y-%m-%d %H:%M:%S')} ({weekday_str})"
+        except Exception:  # noqa: BLE001
+            time_display = str(current_time)
+
+        # 2. [CALENDAR TABLE 21 DAYS (Tra cứu nhanh ngày tháng)]
+        calendar_table = build_calendar_table(current_time)
+
+        # 3. [USER PROFILE & INITIAL STATE]
+        profile_state: dict[str, Any] = {}
+        if user_profile:
+            profile_state["user_profile"] = user_profile
+        for key in ["initial_state", "env_state", "state"]:
+            if key in context:
+                profile_state[key] = context[key]
+        user_profile_json = json.dumps(profile_state or user_profile, ensure_ascii=False, indent=2)
+
+        # 4. [CONVERSATION HISTORY]
+        if history:
+            history_lines = []
+            for idx, turn in enumerate(history, 1):
+                role = turn.get("role", "user")
+                text = turn.get("text") or turn.get("audio_text") or ""
+                tcs = turn.get("tool_calls", [])
+                trs = turn.get("tool_results", [])
+                line = f"- Lượt {idx} ({role}): \"{text}\""
+                if tcs:
+                    line += f"\n  Tool Calls: {json.dumps(tcs, ensure_ascii=False)}"
+                if trs:
+                    line += f"\n  Tool Results: {json.dumps(trs, ensure_ascii=False)}"
+                history_lines.append(line)
+            history_str = "\n".join(history_lines)
+        else:
+            history_str = "Không có lịch sử trước đó."
+
+        # 5. [AVAILABLE TOOLS SCHEMA]
+        tools_spec = self._format_allowed_tools(installed_apps)
+
+        # 6. [ENTITY HINTS (Gợi ý khớp tên từ Profile/History bằng Fuzzy Match)]
+        entity_hints_str = "Không có gợi ý thực thể."
+        if self.enable_fuzzy_grounding and transcript:
+            groundings = fuzzy_entity_grounding(transcript, user_profile, history)
+            if groundings:
+                hints = [
+                    f"- Nghe trong audio: \"{g[0]}\" ──► Thực thể chuẩn hồ sơ: \"{g[1]}\" (Khớp {g[2]}%)"
+                    for g in groundings[:5]
+                ]
+                entity_hints_str = "\n".join(hints)
+
+        # 7. [USER VOICE COMMAND (ASR Transcript)]
+        alt_str = f'\nPhonetic_Alt (2-best): "{alt_transcript}"' if alt_transcript else ""
+
+        return (
+            f"[CURRENT TIME]\n{time_display}\n\n"
+            f"[CALENDAR TABLE 21 DAYS (Tra cứu nhanh ngày tháng)]\n{calendar_table}\n\n"
+            f"[USER PROFILE & INITIAL STATE]\n{user_profile_json}\n\n"
+            f"[CONVERSATION HISTORY]\n{history_str}\n\n"
+            f"[AVAILABLE TOOLS SCHEMA]\n{tools_spec}\n\n"
+            f"[ENTITY HINTS (Gợi ý khớp tên từ Profile/History bằng Fuzzy Match)]\n{entity_hints_str}\n\n"
+            f"[USER VOICE COMMAND (ASR Transcript)]\n"
+            f'Primary Transcript: "{transcript}"'
+            f"{alt_str}\n\n"
+            "Hãy phân tích và xuất JSON `tool_calls` chính xác nhất."
+        )
+
     def build_messages(
         self,
         sample: dict[str, Any],
         transcript_override: str | None = None,
         thinking_mode: bool = False,
+        alt_transcript: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Xây dựng chuỗi messages chuẩn ChatML cho toàn bộ cuộc hội thoại của sample."""
-        transcript = transcript_override or sample.get("audio_text", "")
-        context = sample.get("context", {})
-        history = sample.get("history", [])
-
-        # 1. System Prompt
+        """Xây dựng chuỗi messages chuẩn ChatML: 1 lượt system + 1 lượt user theo blocks."""
         system_content = self.build_system_prompt(
-            context=context,
-            transcript=transcript,
-            history=history,
+            context=sample.get("context", {}),
+            transcript=transcript_override or sample.get("audio_text", ""),
+            history=sample.get("history", []),
             thinking_mode=thinking_mode,
         )
+        user_content = self.build_user_prompt(
+            sample=sample,
+            transcript_override=transcript_override,
+            alt_transcript=alt_transcript,
+        )
 
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": system_content}
+        return [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_content},
         ]
 
-        # 2. History turns
-        for turn in history:
-            role = turn.get("role", "user")
-            content = turn.get("text") or turn.get("audio_text") or ""
 
-            # Nếu là lượt của assistant có tool_calls
-            if role == "assistant" and "tool_calls" in turn:
-                tc_data = {
-                    "tool_calls": turn.get("tool_calls", []),
-                    "tool_results": turn.get("tool_results", []),
-                }
-                messages.append({
-                    "role": "assistant",
-                    "content": f"{content}\n[Thực thi trước đó]: {tc_data}".strip(),
-                })
-            else:
-                messages.append({"role": role, "content": content})
-
-        # 3. Lượt hỏi hiện tại của người dùng
-        messages.append({
-            "role": "user",
-            "content": f"Yêu cầu bằng giọng nói của người dùng: \"{transcript}\"",
-        })
-
-        return messages
+def build_self_correction_prompt(
+    tool_name: str,
+    error_message: str,
+) -> str:
+    """Prompt sửa lỗi tự động (SELF-CORRECTION PROMPT) dùng khi Validate-Before-Call bắt được lỗi."""
+    return (
+        "[VALIDATION ERROR]\n"
+        "Lệnh gọi hàm vừa rồi của bạn không hợp lệ với lỗi cụ thể sau:\n"
+        f"- Hàm `{tool_name}`: {error_message}\n\n"
+        "Hãy kiểm tra lại điều kiện `required` / `x-one-of` / `x-ref` và xuất lại khối JSON `tool_calls` đã sửa lỗi."
+    )
 
 
 def build_prompt_for_sample(
     sample: dict[str, Any],
     tools_catalog: dict[str, Any],
     transcript_override: str | None = None,
+    thinking_mode: bool = False,
 ) -> list[dict[str, Any]]:
     """Helper thuận tiện xây dựng danh sách messages từ 1 record."""
     builder = ContextBuilder(tools_catalog=tools_catalog)
-    return builder.build_messages(sample, transcript_override=transcript_override)
+    return builder.build_messages(
+        sample=sample,
+        transcript_override=transcript_override,
+        thinking_mode=thinking_mode,
+    )

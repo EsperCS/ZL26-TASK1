@@ -100,9 +100,27 @@ def test_context_builder_system_prompt_generation() -> None:
     messages = builder.build_messages(sample)
     assert len(messages) == 2  # System + User
     assert messages[0]["role"] == "system"
-    assert "smart_home.light_set" in messages[0]["content"]
-    assert "2026-11-28" in messages[0]["content"]
-    assert "Yêu cầu bằng giọng nói của người dùng: \"bật đèn phòng khách\"" in messages[1]["content"]
+    assert "LifeMate — trợ lý ảo điều hành công cụ thông minh" in messages[0]["content"]
+    assert "QUY TẮC BẮT BUỘC (HARD RULES)" in messages[0]["content"]
+    
+    assert messages[1]["role"] == "user"
+    assert "[CALENDAR TABLE 21 DAYS" in messages[1]["content"]
+    assert "2026-11-28" in messages[1]["content"]
+    assert "[AVAILABLE TOOLS SCHEMA]" in messages[1]["content"]
+    assert "smart_home.light_set" in messages[1]["content"]
+    assert 'Primary Transcript: "bật đèn phòng khách"' in messages[1]["content"]
+
+
+def test_build_self_correction_prompt() -> None:
+    from src.agent.context_builder import build_self_correction_prompt
+
+    err_prompt = build_self_correction_prompt(
+        tool_name="calendar.update_event",
+        error_message="Thiếu tham số bắt buộc event_id",
+    )
+    assert "[VALIDATION ERROR]" in err_prompt
+    assert "calendar.update_event" in err_prompt
+    assert "Thiếu tham số bắt buộc event_id" in err_prompt
 
 
 def test_build_prompt_for_sample_helper() -> None:

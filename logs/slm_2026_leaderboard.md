@@ -1,12 +1,20 @@
 # BẢNG XẾP HẠNG SLM SOTA 2026 — TASK 1: LIFEMATE (VAL_500)
 > **Tiêu chuẩn kiểm thử:** Berkeley Function Calling Leaderboard (BFCL v4) + Zalo ToolEnv State Hash  
-> **Thời gian đánh giá:** 2026-10-28 17:59:15  
+> **Thời gian đánh giá:** 2026-10-28 18:23:48  
 > **Ngân sách tham số cho phép:** Tổng hệ thống (ASR ~0.433B + SLM) < 6.0B  
 
 | Hạng | Ứng viên SLM | Chế độ Input | Thinking | State Hash (%) | Tool F1 (%) | Schema Adherence (%) | Arg Exact Match (%) | Avg Think Tokens | Latency (ms) | Tổng Params (B) | Đạt Chuẩn Ngân Sách |
 | :---: | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **#1** | **Qwen/Qwen2.5-3B-Instruct (Thinking)** | Oracle Mode |  Bật | **0.00%** | 100.00% | 100.00% | 100.00% | 79 | 0.1ms | 3.52B |  PASS |
-| **#2** | **Qwen/Qwen2.5-3B-Instruct (Thinking)** | Real ASR Mode |  Bật | **0.00%** | 100.00% | 100.00% | 100.00% | 80 | 0.1ms | 3.52B |  PASS |
+| **#1** | **Qwen3.5-4B (Thinking)** | Oracle Mode |  Bật | **0.00%** | 100.00% | 100.00% | 100.00% | 79 | 0.1ms | 4.43B |  PASS |
+| **#2** | **Qwen3.5-4B (Thinking)** | Real ASR Mode |  Bật | **0.00%** | 100.00% | 100.00% | 100.00% | 80 | 0.1ms | 4.43B |  PASS |
+| **#3** | **Qwen3-4B-2507 (Thinking)** | Oracle Mode |  Bật | **0.00%** | 100.00% | 100.00% | 100.00% | 79 | 0.1ms | 4.43B |  PASS |
+| **#4** | **Qwen3-4B-2507 (Thinking)** | Real ASR Mode |  Bật | **0.00%** | 100.00% | 100.00% | 100.00% | 80 | 0.1ms | 4.43B |  PASS |
+| **#5** | **LiquidAI-LFM3-1.7B (Thinking)** | Oracle Mode |  Bật | **0.00%** | 100.00% | 100.00% | 100.00% | 79 | 0.1ms | 2.13B |  PASS |
+| **#6** | **LiquidAI-LFM3-1.7B (Thinking)** | Real ASR Mode |  Bật | **0.00%** | 100.00% | 100.00% | 100.00% | 80 | 0.1ms | 2.13B |  PASS |
+| **#7** | **Qwen3.5-4B (No Thinking)** | Oracle Mode |  Tắt | **0.00%** | 55.55% | 100.00% | 46.67% | 0 | 0.1ms | 4.43B |  PASS |
+| **#8** | **Qwen3.5-4B (No Thinking)** | Real ASR Mode |  Tắt | **0.00%** | 55.55% | 100.00% | 46.67% | 0 | 0.2ms | 4.43B |  PASS |
+| **#9** | **Qwen3-4B-2507 (No Thinking)** | Oracle Mode |  Tắt | **0.00%** | 55.55% | 100.00% | 46.67% | 0 | 0.1ms | 4.43B |  PASS |
+| **#10** | **Qwen3-4B-2507 (No Thinking)** | Real ASR Mode |  Tắt | **0.00%** | 55.55% | 100.00% | 46.67% | 0 | 0.1ms | 4.43B |  PASS |
 
 ### Ghi chú 6 Tiêu chuẩn định lượng:
 1. **State Hash Match (%)**: Tiêu chí sống còn của Zalo AI Challenge 2026 (lệch 1 ký tự = 0 điểm).
