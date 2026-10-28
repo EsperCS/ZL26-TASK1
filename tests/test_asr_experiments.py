@@ -15,6 +15,7 @@ Unit tests cho bộ kịch bản thí nghiệm Fine-tuning & Tuning ASR:
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 from pathlib import Path
 
@@ -184,6 +185,29 @@ def test_capu_data_collator() -> None:
     assert batch_tensors["labels"].size(0) == batch_size
     assert batch_tensors["d_tags"].size(0) == batch_size
     assert batch_tensors["input_offsets"].size(1) == batch_tensors["labels"].size(1)
+
+
+def test_capu_model_num_labels_alignment() -> None:
+    """Kiểm tra mô hình Seq2LabelsModel có num_labels khớp với classifier.out_features (15)."""
+    capu_dir = Path("models/asr/xlm-roberta-capu")
+    if not (capu_dir / "modeling_seq2labels.py").exists():
+        return
+
+    sys_path_added = False
+    if str(capu_dir.resolve()) not in sys.path:
+        sys.path.insert(0, str(capu_dir.resolve()))
+        sys_path_added = True
+
+    try:
+        from modeling_seq2labels import Seq2LabelsModel
+
+        model = Seq2LabelsModel.from_pretrained(str(capu_dir.resolve()))
+        model.num_labels = model.classifier.out_features
+        assert model.num_labels == 15
+        assert model.classifier.out_features == 15
+    finally:
+        if sys_path_added:
+            sys.path.remove(str(capu_dir.resolve()))
 
 
 # ==============================================================================

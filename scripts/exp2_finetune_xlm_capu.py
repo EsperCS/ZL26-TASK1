@@ -250,6 +250,12 @@ def _ensure_pretrained_capu_ready(capu_dir: Path) -> None:
                     "self.bert.resize_token_embeddings(vocab_size + 1, mean_resizing=False)",
                 )
                 modified = True
+            if "self.num_labels = getattr(config, \"vocab_size\", config.num_labels)" not in content:
+                content = content.replace(
+                    "self.num_labels = config.num_labels",
+                    "self.num_labels = getattr(config, \"vocab_size\", config.num_labels)",
+                )
+                modified = True
             if modified:
                 model_file.write_text(content, encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -330,6 +336,10 @@ def train_capu_model(
     device = torch.device(device_str if torch.cuda.is_available() and device_str == "cuda" else "cpu")
     print(f"Khởi tạo mô hình Seq2LabelsModel trên: {device}")
     model = Seq2LabelsModel.from_pretrained(abs_pretrained)
+    # Khóa chặt num_labels khớp với classifier output (15 classes) để tránh lỗi CrossEntropyLoss shape mismatch
+    model.num_labels = model.classifier.out_features
+    if hasattr(model, "config"):
+        model.config.num_labels = model.classifier.out_features
     model.to(device)
     model.train()
 

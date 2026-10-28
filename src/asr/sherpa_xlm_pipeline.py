@@ -426,6 +426,13 @@ class SherpaXLMPipeline:
                 )
                 modified = True
 
+            if "self.num_labels = getattr(config, \"vocab_size\", config.num_labels)" not in content:
+                content = content.replace(
+                    "self.num_labels = config.num_labels",
+                    "self.num_labels = getattr(config, \"vocab_size\", config.num_labels)",
+                )
+                modified = True
+
             if modified:
                 model_file.write_text(content, encoding="utf-8")
         except (OSError, UnicodeDecodeError):
