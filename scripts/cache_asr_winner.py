@@ -274,12 +274,15 @@ def run_cache_asr(
         print("[!] Cảnh báo: Không có CUDA GPU, chuyển về CPU.")
         device = "cpu"
 
+    zipformer_path = REPO_ROOT / "models" / "asr" / "zipformer-150m"
+    vad_path = REPO_ROOT / "models" / "asr" / "vad" / "silero_vad.onnx"
     hotwords_path = REPO_ROOT / "models" / "asr" / "zalo_hotwords.txt"
     capu_path = REPO_ROOT / "models" / "asr" / "xlm-roberta-capu-zalo-ft"
 
-    print(f"[*] Đang khởi tạo SherpaXLMPipeline (Transducer: hynt/ZipFormer-150M, Device: {device})...")
+    print(f"[*] Đang khởi tạo SherpaXLMPipeline (Model: {zipformer_path.name}, Device: {device})...")
     pipeline = SherpaXLMPipeline(
-        transducer_model="hynt/ZipFormer-150M",
+        model_name_or_dir=str(zipformer_path),
+        vad_model_path=str(vad_path),
         hotwords_file=str(hotwords_path) if hotwords_path.is_file() else None,
         capu_model_dir=str(capu_path) if capu_path.is_dir() else None,
         hotwords_score=1.5,
