@@ -208,3 +208,74 @@ def test_phoasr_lora_config() -> None:
     assert peft_config.target_modules == {"q_proj", "v_proj"}
     assert peft_config.lora_dropout == 0.05
     assert peft_config.bias == "none"
+
+
+# ==============================================================================
+# 6. GPU Auto-Config Optimal Training Tests
+# ==============================================================================
+
+
+def test_get_optimal_training_config_no_cuda() -> None:
+    """Kiểm tra bắt buộc báo lỗi RuntimeError khi không có CUDA."""
+    from unittest.mock import patch
+
+    import pytest
+
+    from src.asr.gpu_config import get_optimal_training_config
+
+    with (
+        patch("torch.cuda.is_available", return_value=False),
+        pytest.raises(RuntimeError, match="Không tìm thấy GPU CUDA"),
+    ):
+        get_optimal_training_config()
+
+
+def test_get_optimal_training_config_t4_gpu() -> None:
+    """Kiểm tra cấu hình tối ưu tự động chọn cho GPU Tesla T4 (15GB, CC 7.5)."""
+    from unittest.mock import MagicMock, patch
+
+    from src.asr.gpu_config import get_optimal_training_config
+
+    mock_props = MagicMock()
+    mock_props.total_memory = 15.0 * (1024**3)
+
+    with (
+        patch("torch.cuda.is_available", return_value=True),
+        patch("torch.cuda.get_device_name", return_value="Tesla T4"),
+        patch("torch.cuda.get_device_properties", return_value=mock_props),
+        patch("torch.cuda.get_device_capability", return_value=(7, 5)),
+    ):
+        cfg = get_optimal_training_config(target_effective_batch_size=32, base_lr=1e-4)
+
+        assert cfg["per_device_train_batch_size"] == 16
+        assert cfg["gradient_accumulation_steps"] == 2
+        assert cfg["fp16"] is True
+        assert cfg["bf16"] is False
+        assert cfg["tf32"] is False
+        assert cfg["learning_rate"] == 1e-4
+
+
+def test_get_optimal_training_config_a100_gpu() -> None:
+    """Kiểm tra cấu hình tối ưu tự động chọn cho GPU NVIDIA A100 (40GB, CC 8.0)."""
+    from unittest.mock import MagicMock, patch
+
+    from src.asr.gpu_config import get_optimal_training_config
+
+    mock_props = MagicMock()
+    mock_props.total_memory = 40.0 * (1024**3)
+
+    with (
+        patch("torch.cuda.is_available", return_value=True),
+        patch("torch.cuda.get_device_name", return_value="NVIDIA A100-SXM4-40GB"),
+        patch("torch.cuda.get_device_properties", return_value=mock_props),
+        patch("torch.cuda.get_device_capability", return_value=(8, 0)),
+    ):
+        cfg = get_optimal_training_config(target_effective_batch_size=32, base_lr=2e-5)
+
+        assert cfg["per_device_train_batch_size"] == 32
+        assert cfg["gradient_accumulation_steps"] == 1
+        assert cfg["fp16"] is False
+        assert cfg["bf16"] is True
+        assert cfg["tf32"] is True
+        assert cfg["learning_rate"] == 2e-5
+

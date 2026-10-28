@@ -41,6 +41,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.asr.gpu_config import get_optimal_training_config
 from src.asr.sherpa_xlm_pipeline import SherpaXLMPipeline
 from src.eval.asr_metrics import compute_corpus_metrics
 
@@ -257,6 +258,21 @@ def train_capu_model(
         print("[DRY RUN] Giới hạn train_samples về 16 mẫu...")
         train_samples = train_samples[:16]
 
+    # Tự động tối ưu hóa cấu hình theo GPU
+    if torch.cuda.is_available() and device_str == "cuda":
+        gpu_cfg = get_optimal_training_config(target_effective_batch_size=batch_size, base_lr=lr)
+        batch_size = gpu_cfg["per_device_train_batch_size"]
+        grad_accum = gpu_cfg["gradient_accumulation_steps"]
+        num_workers = gpu_cfg["dataloader_num_workers"]
+        pin_memory = gpu_cfg["dataloader_pin_memory"]
+        lr = gpu_cfg["learning_rate"]
+        use_bf16 = gpu_cfg["bf16"]
+    else:
+        grad_accum = 1
+        num_workers = 0
+        pin_memory = False
+        use_bf16 = False
+
     dataset = CapuDataset(train_samples, vocab_labels, vocab_dtags)
     collator = CapuDataCollator(tokenizer)
     dataloader = DataLoader(
@@ -264,6 +280,8 @@ def train_capu_model(
         batch_size=min(batch_size, len(dataset)),
         shuffle=True,
         collate_fn=collator,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
     )
 
     # 3. Nạp mô hình Seq2LabelsModel
@@ -274,35 +292,45 @@ def train_capu_model(
     model.train()
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
-    total_steps = len(dataloader) * epochs
+    total_steps = (len(dataloader) // grad_accum) * epochs
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
         num_warmup_steps=int(total_steps * 0.1),
-        num_training_steps=total_steps,
+        num_training_steps=max(total_steps, 1),
     )
 
     use_cuda = device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=use_cuda)
+    amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
+    scaler = torch.amp.GradScaler("cuda", enabled=use_cuda and not use_bf16)
 
     print(f"\n[TRAIN] Bắt đầu fine-tune {epochs} epochs trên {len(dataset)} mẫu (Total steps: {total_steps})...")
 
     best_loss = float("inf")
     for epoch in range(1, epochs + 1):
         epoch_losses: list[float] = []
+        optimizer.zero_grad()
         for step, batch in enumerate(dataloader, start=1):
             batch = {k: v.to(device) for k, v in batch.items()}
-            optimizer.zero_grad()
 
-            with torch.amp.autocast("cuda", enabled=use_cuda):
+            with torch.amp.autocast("cuda", enabled=use_cuda, dtype=amp_dtype):
                 outputs = model(**batch)
-                loss = outputs.loss
+                loss = outputs.loss / grad_accum
 
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-            scheduler.step()
+            if use_bf16:
+                loss.backward()
+                if step % grad_accum == 0 or step == len(dataloader):
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    scheduler.step()
+            else:
+                scaler.scale(loss).backward()
+                if step % grad_accum == 0 or step == len(dataloader):
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
+                    scheduler.step()
 
-            loss_val = float(loss.item())
+            loss_val = float(loss.item() * grad_accum)
             epoch_losses.append(loss_val)
 
             if step % 10 == 0 or step == len(dataloader):

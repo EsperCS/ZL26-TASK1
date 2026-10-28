@@ -46,6 +46,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.asr.gpu_config import get_optimal_training_config
 from src.eval.asr_metrics import compute_corpus_metrics
 
 
@@ -182,21 +183,37 @@ def run_lora_training(
     tmp_adapter_dir = output_merged_dir.parent / "phoasr_lora_adapter_tmp"
     tmp_adapter_dir.mkdir(parents=True, exist_ok=True)
 
-    use_cuda = torch.cuda.is_available()
+    target_effective_bs = batch_size * grad_accum
+    if torch.cuda.is_available():
+        gpu_cfg = get_optimal_training_config(
+            target_effective_batch_size=target_effective_bs,
+            base_lr=learning_rate,
+        )
+    else:
+        # Cảnh báo hoặc fallback khi kiểm thử không có CUDA
+        gpu_cfg = {
+            "per_device_train_batch_size": min(batch_size, 4),
+            "per_device_eval_batch_size": min(batch_size * 2, 8),
+            "gradient_accumulation_steps": grad_accum,
+            "learning_rate": learning_rate,
+            "fp16": False,
+            "bf16": False,
+            "tf32": False,
+            "gradient_checkpointing": False,
+            "dataloader_num_workers": 0,
+            "dataloader_pin_memory": False,
+            "auto_find_batch_size": False,
+        }
+
     training_args = Seq2SeqTrainingArguments(
         output_dir=str(tmp_adapter_dir),
-        per_device_train_batch_size=batch_size,
-        gradient_accumulation_steps=grad_accum,
-        learning_rate=learning_rate,
         warmup_ratio=0.1,
         num_train_epochs=epochs,
-        gradient_checkpointing=True,
-        fp16=use_cuda,
         logging_steps=10,
         save_strategy="epoch",
         save_total_limit=1,
         report_to="none",
-        dataloader_num_workers=0,
+        **gpu_cfg,
     )
 
     trainer = Seq2SeqTrainer(
