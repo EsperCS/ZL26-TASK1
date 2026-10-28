@@ -265,6 +265,8 @@ def run_lora_training(
     output_merged_dir.mkdir(parents=True, exist_ok=True)
     merged_model.save_pretrained(str(output_merged_dir))
     processor.save_pretrained(str(output_merged_dir))
+    if hasattr(processor, "feature_extractor"):
+        processor.feature_extractor.save_pretrained(str(output_merged_dir))
     print(f"-> Đã lưu mô hình merged hoàn chỉnh tại: {output_merged_dir.resolve()}")
 
     # Dọn dẹp thư mục adapter tạm
@@ -310,6 +312,19 @@ def convert_merged_to_ct2(
     print(f"\n[CONVERT] Đang chuyển đổi {merged_dir.resolve()} sang CTranslate2 ({quantization})...")
     output_ct2_dir.mkdir(parents=True, exist_ok=True)
 
+    # Đảm bảo preprocessor_config.json luôn tồn tại cho ctranslate2 converter
+    prep_file = merged_dir / "preprocessor_config.json"
+    if not prep_file.exists():
+        try:
+            from transformers import WhisperFeatureExtractor
+
+            fe = WhisperFeatureExtractor.from_pretrained("Qualcomm-AI-Research/PhoASR-whisper-small")
+            fe.save_pretrained(str(merged_dir))
+            print(f"[AUTO-FIX] Đã tự động tạo {prep_file.name} cho mô hình merged.")
+        except Exception as e:  # noqa: BLE001
+            print(f"[CẢNH BÁO] Không thể tạo preprocessor_config.json: {e}")
+
+    copy_files = [f for f in ["tokenizer.json", "preprocessor_config.json"] if (merged_dir / f).exists()]
     cmd = [
         sys.executable,
         "-m",
@@ -321,10 +336,9 @@ def convert_merged_to_ct2(
         "--quantization",
         quantization,
         "--force",
-        "--copy_files",
-        "tokenizer.json",
-        "preprocessor_config.json",
     ]
+    if copy_files:
+        cmd.extend(["--copy_files", *copy_files])
 
     try:
         subprocess.run(cmd, check=True)
