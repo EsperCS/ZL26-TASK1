@@ -20,9 +20,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-# Regex trích xuất định dạng XML chính thức của Liquid AI
+# Regex trích xuất định dạng XML chính thức của Liquid AI (tương thích 100% response_template)
 CALL_RE = re.compile(
-    r"<tool_call>\s*<function=([^>\n]+)>(.*?)</function>\s*</tool_call>",
+    r"<tool_call>\s*<function=([^>\n]+)>(.*?)(?:</function>)?\s*</tool_call>",
     re.DOTALL,
 )
 PARAM_RE = re.compile(
