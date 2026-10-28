@@ -186,6 +186,30 @@ class AgentExecutionResult:
     raw_history: list[dict[str, Any]]
 
 
+def resolve_data_root(split: str, root: str | Path = ".") -> Path:
+    """Tự động tìm kiếm vị trí thực tế của thư mục chứa <split>_environment."""
+    p_root = Path(root)
+    candidate_roots = [
+        p_root,
+        p_root / "train+public_test",
+        Path(__file__).resolve().parent.parent.parent,
+        Path(__file__).resolve().parent.parent.parent / "train+public_test",
+        Path.cwd(),
+        Path.cwd() / "train+public_test",
+        Path("/content/zaloai-challenge-2026"),
+        Path("/content/zaloai-challenge-2026/train+public_test"),
+        Path("/content/drive/MyDrive/ZaloAI_2026_ASR"),
+        Path("/content/drive/MyDrive/ZaloAI_2026_ASR/train+public_test"),
+        Path("/content/drive/MyDrive"),
+        Path("/content/drive/MyDrive/train+public_test"),
+    ]
+    for c in candidate_roots:
+        target_env = c / split / f"{split}_environment"
+        if target_env.is_dir():
+            return c.resolve()
+    return p_root.resolve()
+
+
 class LFM3VoiceAgent:
     """Agent điều phối toàn diện cho bài toán LifeMate bằng mô hình LFM3-1.7B."""
 
@@ -218,7 +242,14 @@ class LFM3VoiceAgent:
         # 1. Khởi tạo ToolEnv DUY NHẤT 1 LẦN cho sample_id (Luật thi Zalo)
         session_env = env
         if session_env is None:
-            session_env = ToolEnv(split=split, question_id=sample_id, root=root)
+            effective_root = resolve_data_root(split=split, root=root)
+            # Kiểm tra nhanh: Nếu file state chưa có tại effective_root, quét tìm động
+            expected_state = effective_root / split / f"{split}_environment" / sample_id / "state.json"
+            if not expected_state.is_file():
+                found_states = list(Path.cwd().glob(f"**/{split}_environment/{sample_id}/state.json"))
+                if found_states:
+                    effective_root = found_states[0].parent.parent.parent
+            session_env = ToolEnv(split=split, question_id=sample_id, root=effective_root)
 
         # 2. Kiểm tra nhanh: Nếu thiết bị không cài app nào hoặc yêu cầu rỗng
         installed_apps = sample.get("context", {}).get("installed_apps", {})

@@ -72,8 +72,14 @@ def main() -> None:
     # Xác định đường dẫn file input
     if args.input_file:
         input_path = Path(args.input_file)
+        if not input_path.is_file() and (root_path / "train+public_test" / args.input_file).is_file():
+            input_path = root_path / "train+public_test" / args.input_file
     else:
-        input_path = root_path / split / f"{split}.jsonl"
+        candidates = [
+            root_path / split / f"{split}.jsonl",
+            root_path / "train+public_test" / split / f"{split}.jsonl",
+        ]
+        input_path = next((p for p in candidates if p.is_file()), candidates[0])
 
     if not input_path.is_file():
         print(f"[x] Lỗi: Không tìm thấy file đầu vào tại {input_path}")
@@ -82,8 +88,14 @@ def main() -> None:
     # Xác định catalog
     if args.catalog:
         catalog_path = Path(args.catalog)
+        if not catalog_path.is_file() and (root_path / "train+public_test" / args.catalog).is_file():
+            catalog_path = root_path / "train+public_test" / args.catalog
     else:
-        catalog_path = root_path / split / f"{split}_tools_catalog.json"
+        candidates = [
+            root_path / split / f"{split}_tools_catalog.json",
+            root_path / "train+public_test" / split / f"{split}_tools_catalog.json",
+        ]
+        catalog_path = next((p for p in candidates if p.is_file()), candidates[0])
 
     if not catalog_path.is_file():
         print(f"[x] Lỗi: Không tìm thấy tools catalog tại {catalog_path}")

@@ -43,3 +43,6 @@ dev = [
 pythonpath = [".", "src", "train"]
 testpaths = ["tests"]
 
+[tool.ruff]
+extend-exclude = ["zaic_tools", "train/zaic_tools", "public_test/zaic_tools", "train+public_test"]
+
