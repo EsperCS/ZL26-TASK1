@@ -308,8 +308,9 @@ def run_cache_asr(
 
             entry = {
                 "audio_path": rel_audio_path,
-                "transcription": res.cleaned_text,
+                "transcription": res.final_text,
                 "raw_acoustic_text": res.raw_acoustic_text,
+                "capu_text": res.capu_text,
                 "duration_sec": round(res.duration_sec, 3),
                 "inference_time_sec": round(dur, 4),
                 "rtf": round(dur / max(res.duration_sec, 0.01), 4),
@@ -326,7 +327,7 @@ def run_cache_asr(
                 rem_time = (len(remaining_tasks) - processed_count) * avg_time
                 print(
                     f"[{idx}/{len(remaining_tasks)}] Audio: {rel_audio_path} | "
-                    f"Trans: \"{res.cleaned_text[:50]}...\" | "
+                    f"Trans: \"{res.final_text[:50]}...\" | "
                     f"RTF: {dur / max(res.duration_sec, 0.01):.3f}x | "
                     f"ETA: {rem_time / 60:.1f}m"
                 )
