@@ -63,6 +63,8 @@ def main() -> None:
     parser.add_argument("--real-model", action="store_true", help="Bật nạp mô hình thật trên GPU (thay vì mock)")
     parser.add_argument("--asr-cache", type=str, default="data/cache/asr_cache.parquet", help="Đường dẫn ASR cache parquet")
     parser.add_argument("--max-react-steps", type=int, default=4, help="Số bước ReAct tối đa cho mỗi mẫu")
+    parser.add_argument("--debug", action="store_true", help="In chi tiết raw output và tool calls của từng mẫu để debug")
+    parser.add_argument("--enable-thinking", action="store_true", help="Bật cơ chế suy luận <think> của LFM3")
 
     args = parser.parse_args()
 
@@ -141,10 +143,21 @@ def main() -> None:
         tools_catalog=tools_catalog,
         runner=runner,
         max_react_steps=args.max_react_steps,
+        enable_thinking=args.enable_thinking,
     )
 
     output_path = Path(args.output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    debug_report_path = Path("logs/lfm3_debug_report.md")
+    debug_report_path.parent.mkdir(parents=True, exist_ok=True)
+    debug_markdown_lines = [
+        "# BÁO CÁO CHI TIẾT DEBUG MÔ HÌNH LFM3-1.7B (TASK 1: LIFEMATE)",
+        f"> **Thời gian chạy:** {time.strftime('%Y-%m-%d %H:%M:%S')}  ",
+        f"> **Split:** {split} | **Enable Thinking:** {args.enable_thinking}  ",
+        "",
+        "---",
+    ]
 
     match_count = 0
     total_evaluated = 0
@@ -178,21 +191,85 @@ def main() -> None:
             # Đối chiếu kết quả nếu sample có nhãn (như tập train/val)
             gold_label = sample.get("label")
             status_str = ""
+            g_calls = gold_label.get("tool_calls", []) if gold_label else []
+            call_match = False
+
             if gold_label:
                 total_evaluated += 1
-                call_match = (len(res.tool_calls) == len(gold_label.get("tool_calls", [])))
+                call_match = (len(res.tool_calls) == len(g_calls))
                 if call_match:
                     match_count += 1
                     status_str = f" | Calls Match: [✓] ({len(res.tool_calls)})"
                 else:
-                    status_str = f" | Calls: {len(res.tool_calls)} vs Gold: {len(gold_label.get('tool_calls', []))}"
+                    status_str = f" | Calls: {len(res.tool_calls)} vs Gold: {len(g_calls)}"
 
-            print(
-                f"[{idx:3d}/{total_samples:3d}] Sample: {s_id} | Steps: {res.steps_taken} | "
-                f"Retries: {res.validation_retries} | Hash: {res.state_hash[:12]}... | "
-                f"Lat: {res.execution_time_ms:.0f}ms{status_str}",
-                flush=True,
-            )
+            # Chế độ Debug hiển thị toàn bộ chi tiết cho người dùng
+            should_debug = args.debug or (total_samples <= 20)
+
+            if should_debug:
+                print(f"\n{'='*80}")
+                print(f"📌 [SAMPLE #{idx}/{total_samples}] ID: `{s_id}`")
+                print(f"🗣️  TRANSCRIPT: \"{transcript}\"")
+                print(f"📱 APPS CÀI ĐẶT: {list(sample.get('context', {}).get('installed_apps', {}).keys())}")
+                print(f"{'-'*80}")
+                print(f"🤖 RAW MODEL OUTPUT (LFM3-1.7B Sinh Ra):\n{res.raw_model_response or '(Rỗng / Không có response)'}")
+                print(f"{'-'*80}")
+                print(f"⚙️ TOOL CALLS ĐÃ BÓC TÁCH ({len(res.tool_calls)} calls):")
+                if res.tool_calls:
+                    for c_idx, c in enumerate(res.tool_calls, 1):
+                        print(f"   [{c_idx}] {c.get('name')}({json.dumps(c.get('arguments', {}), ensure_ascii=False)})")
+                else:
+                    print("   (Không có tool call nào được gọi)")
+
+                if gold_label:
+                    print(f"🎯 GOLD TARGET CALLS ({len(g_calls)} calls):")
+                    if g_calls:
+                        for c_idx, c in enumerate(g_calls, 1):
+                            print(f"   [{c_idx}] {c.get('name')}({json.dumps(c.get('arguments', {}), ensure_ascii=False)})")
+                    else:
+                        print("   (Mẫu Out-of-scope: Gold = [])")
+
+                if res.validation_logs:
+                    print("⚠️ NHẬT KÝ VALIDATE LỖI (RETRIES):\n" + "\n".join(f"   - {l}" for l in res.validation_logs))
+
+                print(f"🏁 KẾT QUẢ: Match: {'ĐÚNG [✓]' if call_match else 'CHƯA KHỚP [X]'} | Hash: {res.state_hash[:16]}... | Latency: {res.execution_time_ms:.0f}ms")
+                print(f"{'='*80}\n", flush=True)
+
+                # Ghi vào file markdown debug
+                debug_markdown_lines.extend([
+                    f"## Mẫu #{idx}: `{s_id}`",
+                    f"- **Transcript:** *\"{transcript}\"*",
+                    f"- **Installed Apps:** `{list(sample.get('context', {}).get('installed_apps', {}).keys())}`",
+                    f"- **Trạng thái:** {'Khớp [✓]' if call_match else 'Chưa khớp [X]'}",
+                    "",
+                    "### 1. Phản hồi thô của LFM3 (Raw Generation):",
+                    "```text",
+                    res.raw_model_response or "(Rỗng)",
+                    "```",
+                    "",
+                    "### 2. Tool Calls Bóc Tách:",
+                    "```json",
+                    json.dumps(res.tool_calls, ensure_ascii=False, indent=2),
+                    "```",
+                    "",
+                    "### 3. Tool Calls Đáp Án (Gold):",
+                    "```json",
+                    json.dumps(g_calls, ensure_ascii=False, indent=2),
+                    "```",
+                    "",
+                    "---",
+                ])
+            else:
+                print(
+                    f"[{idx:3d}/{total_samples:3d}] Sample: {s_id} | Steps: {res.steps_taken} | "
+                    f"Retries: {res.validation_retries} | Hash: {res.state_hash[:12]}... | "
+                    f"Lat: {res.execution_time_ms:.0f}ms{status_str}",
+                    flush=True,
+                )
+
+    # Lưu file báo cáo debug
+    with open(debug_report_path, "w", encoding="utf-8") as df_out:
+        df_out.write("\n".join(debug_markdown_lines))
 
     total_time = time.perf_counter() - t_start
     print("================================================================================")

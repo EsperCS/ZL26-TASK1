@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -118,6 +118,8 @@ class LFM3ModelRunner:
     def generate(
         self,
         messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        enable_thinking: bool = False,
         max_new_tokens: int = 512,
         temperature: float = 0.0,
     ) -> str:
@@ -125,15 +127,24 @@ class LFM3ModelRunner:
         if not self._is_loaded:
             self.load()
 
-        # Áp dụng ChatML template
+        # Áp dụng ChatML template với tools và enable_thinking
         try:
             prompt = self.tokenizer.apply_chat_template(
                 messages,
+                tools=tools if tools else None,
                 tokenize=False,
                 add_generation_prompt=True,
+                enable_thinking=enable_thinking,
             )
         except Exception:  # noqa: BLE001
-            prompt = "\n".join(f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>" for m in messages) + "\n<|im_start|>assistant\n"
+            try:
+                prompt = self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            except Exception:  # noqa: BLE001
+                prompt = "\n".join(f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>" for m in messages) + "\n<|im_start|>assistant\n"
 
         inputs = self.tokenizer(prompt, return_tensors="pt")
         input_ids = inputs["input_ids"].to(self.model.device)
@@ -184,6 +195,9 @@ class AgentExecutionResult:
     validation_retries: int
     execution_time_ms: float
     raw_history: list[dict[str, Any]]
+    raw_model_response: str = ""
+    parsed_output: LFM3ParsedOutput | None = None
+    validation_logs: list[str] = field(default_factory=list)
 
 
 def resolve_data_root(split: str, root: str | Path = ".") -> Path:
@@ -219,12 +233,14 @@ class LFM3VoiceAgent:
         runner: LFM3ModelRunner | None = None,
         max_react_steps: int = 4,
         max_self_correction_retries: int = 2,
+        enable_thinking: bool = False,
     ) -> None:
         self.tools_catalog = tools_catalog
         self.context_builder = ContextBuilder(tools_catalog=tools_catalog)
         self.runner = runner
         self.max_react_steps = max_react_steps
         self.max_self_correction_retries = max_self_correction_retries
+        self.enable_thinking = enable_thinking
 
     def run_sample(
         self,
@@ -262,17 +278,26 @@ class LFM3VoiceAgent:
                 validation_retries=0,
                 execution_time_ms=(time.perf_counter() - t0) * 1000.0,
                 raw_history=[],
+                raw_model_response="",
+                parsed_output=None,
+                validation_logs=[],
             )
+
+        # Trích xuất tool schemas định dạng native function calling cho LFM3
+        tools_schema = self.context_builder.build_tools_schema(installed_apps)
 
         # 3. Khởi tạo tin nhắn ChatML
         messages = self.context_builder.build_messages(
             sample=sample,
             transcript_override=transcript,
-            thinking_mode=False,
+            thinking_mode=self.enable_thinking,
         )
 
         steps_taken = 0
         total_val_retries = 0
+        validation_logs: list[str] = []
+        last_raw_response = ""
+        last_parsed: LFM3ParsedOutput | None = None
 
         # 4. Vòng lặp ReAct Loop (Tối đa max_react_steps)
         executed_call_signatures: set[str] = set()
@@ -282,13 +307,21 @@ class LFM3VoiceAgent:
 
             # Sinh phản hồi từ mô hình LFM3-1.7B
             if self.runner is not None:
-                response_text = self.runner.generate(messages=messages, temperature=0.0)
+                response_text = self.runner.generate(
+                    messages=messages,
+                    tools=tools_schema,
+                    enable_thinking=self.enable_thinking,
+                    temperature=0.0,
+                )
             else:
                 # Chế độ Fallback / Mock phục vụ test local không có GPU
                 response_text = self._fallback_generate(sample, transcript)
 
+            last_raw_response = response_text
+
             # Bóc tách tool calls từ phản hồi
             parsed: LFM3ParsedOutput = parse_lfm3_response(response_text)
+            last_parsed = parsed
 
             # Nếu mô hình xác định xong tác vụ hoặc out-of-scope (không có tool call nào)
             if not parsed.tool_calls or parsed.is_out_of_scope:
@@ -316,6 +349,7 @@ class LFM3VoiceAgent:
                     total_val_retries += 1
                     retry_count += 1
                     err_msg = val_res.get("error", "Lỗi schema không xác định")
+                    validation_logs.append(f"Step {step} - `{fn_name}` Validate Fail: {err_msg}")
 
                     # Gửi phản hồi lỗi về cho mô hình tự sửa
                     correction_prompt = build_self_correction_prompt(fn_name, err_msg)
@@ -324,7 +358,12 @@ class LFM3VoiceAgent:
                     retry_messages.append({"role": "user", "content": correction_prompt})
 
                     if self.runner is not None:
-                        retry_text = self.runner.generate(messages=retry_messages, temperature=0.0)
+                        retry_text = self.runner.generate(
+                            messages=retry_messages,
+                            tools=tools_schema,
+                            enable_thinking=self.enable_thinking,
+                            temperature=0.0,
+                        )
                     else:
                         break
 
@@ -367,6 +406,9 @@ class LFM3VoiceAgent:
             validation_retries=total_val_retries,
             execution_time_ms=latency_ms,
             raw_history=messages,
+            raw_model_response=last_raw_response,
+            parsed_output=last_parsed,
+            validation_logs=validation_logs,
         )
 
     def _fallback_generate(self, sample: dict[str, Any], transcript: str) -> str:

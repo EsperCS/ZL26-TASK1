@@ -246,6 +246,50 @@ class ContextBuilder:
             f"{thinking_instruction}"
         )
 
+    def build_tools_schema(self, installed_apps: dict[str, Any]) -> list[dict[str, Any]]:
+        """Trích xuất danh sách tool schemas chuẩn định dạng function calling cho apply_chat_template."""
+        apps_in_catalog = {a["id"]: a for a in self.tools_catalog.get("apps", [])}
+        tools: list[dict[str, Any]] = []
+
+        # Luôn thêm sys.ask_missing_info
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "sys.ask_missing_info",
+                "description": "Hỏi lại người dùng khi thiếu thông tin bắt buộc để thực hiện tác vụ.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "tool_name": {"type": "string", "description": "Tên tool dự định gọi"},
+                        "params": {"type": "array", "items": {"type": "string"}, "description": "Danh sách tham số còn thiếu"},
+                    },
+                    "required": ["tool_name", "params"],
+                },
+            },
+        })
+
+        for app_id, app_info in installed_apps.items():
+            app_spec = apps_in_catalog.get(app_id)
+            if not app_spec:
+                continue
+
+            tool_names_allowed = set(app_info.get("tools", []))
+            for tool in app_spec.get("tools", []):
+                t_name = tool.get("name")
+                if t_name not in tool_names_allowed:
+                    continue
+
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": t_name,
+                        "description": tool.get("description", ""),
+                        "parameters": tool.get("parameters", {"type": "object", "properties": {}}),
+                    },
+                })
+
+        return tools
+
     def _format_allowed_tools(self, installed_apps: dict[str, Any]) -> str:
         """Định dạng mô tả schema của các tool thuộc các app đã cài đặt."""
         apps_in_catalog = {a["id"]: a for a in self.tools_catalog.get("apps", [])}
