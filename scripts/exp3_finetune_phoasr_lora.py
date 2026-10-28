@@ -567,6 +567,7 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="cuda", help="Thiết bị tính toán (cuda hoặc cpu)")
     parser.add_argument("--dry-run", action="store_true", help="Chế độ dry-run kiểm tra luồng không train thật")
     parser.add_argument("--eval-only", action="store_true", help="Chỉ chạy đánh giá nếu đã có model CT2")
+    parser.add_argument("--force-train", action="store_true", help="Bắt buộc huấn luyện lại từ đầu dù đã có checkpoint merged cũ")
     parser.add_argument("--limit", type=int, default=None, help="Giới hạn số mẫu eval")
     args = parser.parse_args()
 
@@ -598,9 +599,14 @@ def main() -> None:
         or (args.tmp_merged_dir / "pytorch_model.bin").exists()
     )
     if not args.eval_only:
-        if has_merged_weights:
-            print(f"\n[REUSE] Tìm thấy mô hình merged đã có sẵn tại {args.tmp_merged_dir.resolve()}. Bỏ qua training LoRA.")
+        if has_merged_weights and not args.force_train:
+            print(f"\n[REUSE] Tìm thấy mô hình merged đã có sẵn tại {args.tmp_merged_dir.resolve()}. Bỏ qua training LoRA. (Truyền thêm --force-train nếu muốn huấn luyện lại).")
         else:
+            if has_merged_weights and args.force_train:
+                print(f"\n[FORCE TRAIN] Xóa checkpoint cũ để huấn luyện lại {args.epochs} epochs từ đầu...")
+                shutil.rmtree(args.tmp_merged_dir, ignore_errors=True)
+                shutil.rmtree(args.output_ct2_dir, ignore_errors=True)
+
             train_items = [json.loads(line) for line in asr_train_lines if line.strip()]
             run_lora_training(
                 train_items=train_items,
