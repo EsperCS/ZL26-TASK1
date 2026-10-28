@@ -226,13 +226,18 @@ class ContextBuilder:
             "3. XỬ LÝ KHẨU NGỮ, ĐỔI Ý (SELF-CORRECTION) & ĐIỀU KIỆN:\n"
             "   - Đổi ý: Khi người dùng nói 'làm A, à thôi B đi' hoặc 'chọn X, à thôi Y' -> BỎ QUA A/X, CHỈ THỰC HIỆN B/Y.\n"
             "   - Điều kiện ('nếu... thì...'): Gọi hàm truy vấn/kiểm tra trước (list/get), sau đó thực thi hành động tương ứng.\n\n"
-            "4. TUÂN THỦ NGHIÊM NGẶT RÀNG BUỘC SCHEMA:\n"
+            "4. RÀNG BUỘC THIẾU THÔNG TIN (sys.ask_missing_info):\n"
+            "   - Nếu yêu cầu của người dùng thiếu tham số bắt buộc không thể tự suy đoán hoặc tra cứu được: BẮT BUỘC gọi `sys.ask_missing_info` với `tool_name` (tên tool dự định gọi) và `params` (danh sách tham số còn thiếu).\n\n"
+            "5. QUY TẮC ĐỌC TRƯỚC - GHI SAU (READ-BEFORE-WRITE MULTI-STEP):\n"
+            "   - Khi cần thông tin từ môi trường (ID thuốc, ID sự kiện, ID liên hệ, ID nhà hàng/món ăn): BẮT BUỘC chỉ gọi công cụ ĐỌC (như `.list`, `.search`, `.get`) trước.\n"
+            "   - Hệ thống sẽ trả kết quả trong `[OBSERVATION]`. Lượt tiếp theo, bạn mới dùng ID thực tế đó để gọi công cụ ghi. Tuyệt đối KHÔNG tự bịa ID hoặc viết placeholder dạng `<sẽ lấy từ...>`.\n\n"
+            "6. TUÂN THỦ NGHIÊM NGẶT RÀNG BUỘC SCHEMA & PHẠM VI ỨNG DỤNG:\n"
             "   - `required`: Phải điền đầy đủ mọi tham số bắt buộc. Tuyệt đối không truyền chuỗi rỗng \"\" hoặc null cho tham số bắt buộc.\n"
             "   - `x-one-of`: Chỉ được phép truyền ĐÚNG MỘT trong các nhóm tham số được liệt kê trong ràng buộc `x-one-of`, tuyệt đối không truyền đồng thời cả hai.\n"
-            "   - `x-ref`: Khi một tham số yêu cầu tham chiếu (`x-ref`) tới đối tượng khác (như `contact_id`, `event_id`, `alarm_id`), phải lấy đúng ID từ [USER PROFILE], kết quả trả về của tool trước đó trong [CONVERSATION HISTORY], hoặc gọi hàm tìm kiếm/liệt kê trước khi cập nhật/xóa.\n\n"
-            "5. THỨ TỰ & ĐỊNH DẠNG ĐẦU RA:\n"
+            "   - `x-ref`: Khi một tham số yêu cầu tham chiếu (`x-ref`) tới đối tượng khác (như `contact_id`, `event_id`, `alarm_id`), phải lấy đúng ID từ [USER PROFILE], kết quả trả về của tool trước đó trong [CONVERSATION HISTORY], hoặc gọi hàm tìm kiếm/liệt kê trước khi cập nhật/xóa.\n"
+            "   - Yêu cầu ngoài phạm vi: Nếu người dùng yêu cầu hành động thuộc ứng dụng chưa cài đặt trên thiết bị, BẮT BUỘC xuất ra danh sách rỗng: `\"tool_calls\": []`.\n\n"
+            "7. THỨ TỰ & ĐỊNH DẠNG ĐẦU RA:\n"
             "   - Chỉ gọi các hàm thực sự cần thiết theo đúng thứ tự logic. Nếu yêu cầu có nhiều ý độc lập, hãy xuất đầy đủ các tool calls tương ứng.\n"
-            "   - Nếu yêu cầu nằm ngoài phạm vi hoặc công cụ liên quan chưa được cài đặt, xuất ra danh sách rỗng: `\"tool_calls\": []`.\n"
             "   - TUYỆT ĐỐI KHÔNG SUY LUẬN BẰNG TIẾNG ANH (NO English CoT monologue). BẮT BUỘC chỉ xuất ra đúng khối JSON, không giải thích lan man ngoài JSON:\n"
             "```json\n"
             "{\n"
@@ -335,6 +340,16 @@ class ContextBuilder:
 
                     req_tag = " [BẮT BUỘC]" if p_name in required else " [tùy chọn]"
                     extra = []
+                    if p_type == "array" and "items" in p_spec:
+                        items_spec = p_spec["items"]
+                        i_type = items_spec.get("type", "string")
+                        if i_type == "object" and "properties" in items_spec:
+                            i_props = items_spec.get("properties", {})
+                            i_req = items_spec.get("required", [])
+                            i_fields = [f"{k}: {v.get('type')}{' [BẮT BUỘC]' if k in i_req else ''}" for k, v in i_props.items()]
+                            extra.append(f"danh sách đối tượng [{{{', '.join(i_fields)}}}]")
+                        else:
+                            extra.append(f"danh sách {i_type}")
                     if p_enum:
                         extra.append(f"chỉ chọn 1 trong {p_enum}")
                     if p_fmt:
@@ -384,14 +399,19 @@ class ContextBuilder:
         # 2. [CALENDAR TABLE 21 DAYS (Tra cứu nhanh ngày tháng)]
         calendar_table = build_calendar_table(current_time)
 
-        # 3. [USER PROFILE & INITIAL STATE]
+        # 3. [USER PROFILE & DEVICE CONTEXT]
         profile_state: dict[str, Any] = {}
         if user_profile:
             profile_state["user_profile"] = user_profile
+        if "location" in context:
+            profile_state["gps_location"] = context["location"]
+        if "timezone" in context:
+            profile_state["timezone"] = context["timezone"]
+        profile_state["installed_apps"] = list(installed_apps.keys())
         for key in ["initial_state", "env_state", "state"]:
             if key in context:
                 profile_state[key] = context[key]
-        user_profile_json = json.dumps(profile_state or user_profile, ensure_ascii=False, indent=2)
+        user_profile_json = json.dumps(profile_state, ensure_ascii=False, indent=2)
 
         # 4. [CONVERSATION HISTORY]
         if history:

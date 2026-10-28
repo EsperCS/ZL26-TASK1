@@ -224,6 +224,16 @@ def resolve_data_root(split: str, root: str | Path = ".") -> Path:
     return p_root.resolve()
 
 
+def is_read_tool(name: str) -> bool:
+    """Xác định tool có phải là công cụ đọc dữ liệu (read) không."""
+    try:
+        from zaic_tools.executor import Simulator
+        return Simulator.kind(name) == "read"
+    except (ImportError, AttributeError, KeyError):
+        read_prefixes = [".search", ".list", ".get", ".read", ".track", ".calculate", ".check", ".guide", ".headlines"]
+        return any(k in name for k in read_prefixes)
+
+
 class LFM3VoiceAgent:
     """Agent điều phối toàn diện cho bài toán LifeMate bằng mô hình LFM3-1.7B."""
 
@@ -382,12 +392,18 @@ class LFM3VoiceAgent:
                     executed_call_signatures.add(call_sig)
                     new_calls_executed += 1
 
-                    # Nếu là tool đọc dữ liệu (read/search), nạp kết quả vào ngữ cảnh ReAct
-                    if any(prefix in fn_name for prefix in [".search", ".list", ".get"]):
+                    # Nếu là meta tool sys.ask_missing_info: Đã hoàn tất hỏi người dùng, kết thúc phiên
+                    if fn_name == "sys.ask_missing_info":
+                        turn_has_observations = False
+                        break
+
+                    # Nếu là tool đọc dữ liệu (read tool), nạp kết quả quan sát và cho LLM nhìn thấy
+                    if is_read_tool(fn_name):
                         turn_has_observations = True
                         obs_content = f"Kết quả gọi tool `{fn_name}`: {json.dumps(call_result, ensure_ascii=False)}"
                         messages.append({"role": "assistant", "content": f"Gọi tool `{fn_name}` với arguments: {json.dumps(fn_args, ensure_ascii=False)}"})
                         messages.append({"role": "user", "content": f"[OBSERVATION]\n{obs_content}\nHãy hoàn thành bước tiếp theo theo yêu cầu ban đầu."})
+                        break  # Dừng lượt này để mô hình quan sát trước khi gọi lệnh ghi tiếp theo
 
             # Nếu không có call mới nào được thực thi hoặc không có quan sát mới cần xử lý tiếp -> Dừng
             if new_calls_executed == 0 or not turn_has_observations:
