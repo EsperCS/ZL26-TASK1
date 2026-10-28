@@ -221,15 +221,19 @@ class ContextBuilder:
             "   - BẮT BUỘC đối chiếu và lấy chính xác 100% tên người, số điện thoại, email, địa điểm hoặc ID sự kiện từ [USER PROFILE], [ENTITY HINTS] hoặc [CONVERSATION HISTORY]. Tuyệt đối không tự bịa (hallucinate) ID hoặc tên không tồn tại.\n\n"
             "2. QUY CHIẾU THỜI GIAN TUYỆT ĐỐI (DATE & TIME RESOLUTION):\n"
             "   - Dựa vào [CURRENT TIME] và [CALENDAR TABLE 21 DAYS] được cung cấp sẵn để quy đổi các từ chỉ thời gian tương đối (\"hôm nay\", \"ngày mai\", \"thứ sáu tuần này\", \"tuần sau\", \"9 rưỡi tối\") sang định dạng chuẩn của schema (ví dụ: YYYY-MM-DD, HH:MM).\n"
-            "   - Không tự nhẩm tính thứ/ngày ngoài bảng lịch đã cho.\n\n"
-            "3. TUÂN THỦ NGHIÊM NGẶT RÀNG BUỘC SCHEMA:\n"
+            "   - 'sáng' = AM (ví dụ: 'chín giờ sáng' = 09:00:00, TUYỆT ĐỐI KHÔNG nhầm thành 18:00 hay 06:00). 'chiều' / 'tối' / 'đêm' = PM ('sáu giờ chiều' = 18:00:00, 'mười một giờ đêm' = 23:00:00).\n"
+            "   - Khẩu ngữ địa phương: 'chiều ni' / 'sáng ni' = chiều nay / sáng nay. Không tự nhẩm tính thứ/ngày ngoài bảng lịch đã cho.\n\n"
+            "3. XỬ LÝ KHẨU NGỮ, ĐỔI Ý (SELF-CORRECTION) & ĐIỀU KIỆN:\n"
+            "   - Đổi ý: Khi người dùng nói 'làm A, à thôi B đi' hoặc 'chọn X, à thôi Y' -> BỎ QUA A/X, CHỈ THỰC HIỆN B/Y.\n"
+            "   - Điều kiện ('nếu... thì...'): Gọi hàm truy vấn/kiểm tra trước (list/get), sau đó thực thi hành động tương ứng.\n\n"
+            "4. TUÂN THỦ NGHIÊM NGẶT RÀNG BUỘC SCHEMA:\n"
             "   - `required`: Phải điền đầy đủ mọi tham số bắt buộc. Tuyệt đối không truyền chuỗi rỗng \"\" hoặc null cho tham số bắt buộc.\n"
             "   - `x-one-of`: Chỉ được phép truyền ĐÚNG MỘT trong các nhóm tham số được liệt kê trong ràng buộc `x-one-of`, tuyệt đối không truyền đồng thời cả hai.\n"
             "   - `x-ref`: Khi một tham số yêu cầu tham chiếu (`x-ref`) tới đối tượng khác (như `contact_id`, `event_id`, `alarm_id`), phải lấy đúng ID từ [USER PROFILE], kết quả trả về của tool trước đó trong [CONVERSATION HISTORY], hoặc gọi hàm tìm kiếm/liệt kê trước khi cập nhật/xóa.\n\n"
-            "4. THỨ TỰ & ĐỊNH DẠNG ĐẦU RA:\n"
-            "   - Chỉ gọi các hàm thực sự cần thiết theo đúng thứ tự logic. Nếu yêu cầu có nhiều ý độc lập (ví dụ: vừa đặt báo thức vừa nhắn tin), hãy xuất đầy đủ các tool calls tương ứng.\n"
+            "5. THỨ TỰ & ĐỊNH DẠNG ĐẦU RA:\n"
+            "   - Chỉ gọi các hàm thực sự cần thiết theo đúng thứ tự logic. Nếu yêu cầu có nhiều ý độc lập, hãy xuất đầy đủ các tool calls tương ứng.\n"
             "   - Nếu yêu cầu nằm ngoài phạm vi hoặc công cụ liên quan chưa được cài đặt, xuất ra danh sách rỗng: `\"tool_calls\": []`.\n"
-            "   - Xuất kết quả dưới dạng JSON chuẩn theo cấu trúc:\n"
+            "   - TUYỆT ĐỐI KHÔNG SUY LUẬN BẰNG TIẾNG ANH (NO English CoT monologue). BẮT BUỘC chỉ xuất ra đúng khối JSON, không giải thích lan man ngoài JSON:\n"
             "```json\n"
             "{\n"
             "  \"brief_plan\": \"<Tóm tắt ngắn gọn: dùng hàm nào, ngày giờ gì quy đổi ra sao>\",\n"
@@ -391,8 +395,11 @@ class ContextBuilder:
 
         # 4. [CONVERSATION HISTORY]
         if history:
+            # Lấy tối đa 4 lượt gần nhất để tránh tràn context và lan man
+            recent_history = history[-4:]
+            start_turn = max(1, len(history) - len(recent_history) + 1)
             history_lines = []
-            for idx, turn in enumerate(history, 1):
+            for idx, turn in enumerate(recent_history, start_turn):
                 role = turn.get("role", "user")
                 text = turn.get("text") or turn.get("audio_text") or ""
                 tcs = turn.get("tool_calls", [])
@@ -401,7 +408,18 @@ class ContextBuilder:
                 if tcs:
                     line += f"\n  Tool Calls: {json.dumps(tcs, ensure_ascii=False)}"
                 if trs:
-                    line += f"\n  Tool Results: {json.dumps(trs, ensure_ascii=False)}"
+                    # Rút gọn các mảng kết quả quá dài để tiết kiệm context
+                    trimmed_trs = []
+                    for r in trs:
+                        if isinstance(r, dict):
+                            r_copy = dict(r)
+                            for k, v in list(r_copy.items()):
+                                if isinstance(v, list) and len(v) > 3:
+                                    r_copy[k] = v[:3] + [f"...(còn {len(v)-3} mục nữa)"]
+                            trimmed_trs.append(r_copy)
+                        else:
+                            trimmed_trs.append(r)
+                    line += f"\n  Tool Results: {json.dumps(trimmed_trs, ensure_ascii=False)}"
                 history_lines.append(line)
             history_str = "\n".join(history_lines)
         else:

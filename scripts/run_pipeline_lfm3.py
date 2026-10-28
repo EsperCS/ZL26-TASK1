@@ -192,16 +192,23 @@ def main() -> None:
             gold_label = sample.get("label")
             status_str = ""
             g_calls = gold_label.get("tool_calls", []) if gold_label else []
+            gold_hash = gold_label.get("state_hash", "") if gold_label else ""
             call_match = False
+            hash_match = False
 
             if gold_label:
                 total_evaluated += 1
-                call_match = (len(res.tool_calls) == len(g_calls))
-                if call_match:
+                hash_match = bool(gold_hash and res.state_hash == gold_hash)
+                call_match = (
+                    [c.get("name") for c in res.tool_calls] == [c.get("name") for c in g_calls]
+                )
+                if hash_match:
                     match_count += 1
-                    status_str = f" | Calls Match: [✓] ({len(res.tool_calls)})"
+                    status_str = " | Hash Match: [✓]"
+                elif call_match:
+                    status_str = " | Tool Sequence: [✓] (State diff)"
                 else:
-                    status_str = f" | Calls: {len(res.tool_calls)} vs Gold: {len(g_calls)}"
+                    status_str = f" | Calls: {len(res.tool_calls)}/{len(g_calls)}"
 
             # Chế độ Debug hiển thị toàn bộ chi tiết cho người dùng
             should_debug = args.debug or (total_samples <= 20)
@@ -232,7 +239,11 @@ def main() -> None:
                 if res.validation_logs:
                     print("⚠️ NHẬT KÝ VALIDATE LỖI (RETRIES):\n" + "\n".join(f"   - {l}" for l in res.validation_logs))
 
-                print(f"🏁 KẾT QUẢ: Match: {'ĐÚNG [✓]' if call_match else 'CHƯA KHỚP [X]'} | Hash: {res.state_hash[:16]}... | Latency: {res.execution_time_ms:.0f}ms")
+                print(f"🏁 KẾT QUẢ: Tool Names Match: {'[✓]' if call_match else '[X]'} | State Hash Match: {'[✓]' if hash_match else '[X]'}")
+                print(f"   Model State Hash: {res.state_hash}")
+                if gold_hash:
+                    print(f"   Gold Target Hash: {gold_hash}")
+                print(f"   Execution Latency: {res.execution_time_ms:.0f}ms")
                 print(f"{'='*80}\n", flush=True)
 
                 # Ghi vào file markdown debug

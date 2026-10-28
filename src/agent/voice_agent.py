@@ -120,7 +120,7 @@ class LFM3ModelRunner:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         enable_thinking: bool = False,
-        max_new_tokens: int = 512,
+        max_new_tokens: int = 1024,
         temperature: float = 0.0,
     ) -> str:
         """Sinh chuỗi văn bản đầu ra từ danh sách messages."""

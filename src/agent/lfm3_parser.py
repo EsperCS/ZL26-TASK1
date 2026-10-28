@@ -37,6 +37,40 @@ CHATML_CALL_RE = re.compile(
 )
 
 
+def sanitize_json_text(text: str) -> str:
+    """Loại bỏ comment (// và /* */), dấu phẩy thừa (trailing commas) để json.loads không bị lỗi."""
+    # 1. Bỏ block comments /* ... */
+    cleaned = re.sub(r"/\*[\s\S]*?\*/", "", text)
+    # 2. Bỏ single-line comments // ... (không xóa trong URL http:// hoặc https://)
+    cleaned = re.sub(r"(?<!:)\s*//.*$", "", cleaned, flags=re.MULTILINE)
+    # 3. Bỏ trailing commas trước } hoặc ]
+    cleaned = re.sub(r",\s*([\}\]])", r"\1", cleaned)
+    # 4. Chuẩn hóa True/False/None sang true/false/null nếu LLM sinh kiểu Python
+    cleaned = re.sub(r"\bTrue\b", "true", cleaned)
+    cleaned = re.sub(r"\bFalse\b", "false", cleaned)
+    cleaned = re.sub(r"\bNone\b", "null", cleaned)
+    return cleaned.strip()
+
+
+def extract_tool_calls_fallback(text: str) -> list[dict[str, Any]]:
+    """Trích xuất từng tool call riêng biệt bằng regex khi toàn bộ chuỗi JSON bị vỡ cú pháp."""
+    calls: list[dict[str, Any]] = []
+    pattern = re.compile(
+        r'\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"arguments"\s*:\s*(\{[\s\S]*?\})\s*\}'
+    )
+    for match in pattern.finditer(text):
+        name = match.group(1).strip()
+        raw_args = match.group(2).strip()
+        cleaned_args = sanitize_json_text(raw_args)
+        try:
+            args = json.loads(cleaned_args)
+        except (json.JSONDecodeError, ValueError, TypeError):
+            args = {}
+        calls.append({"name": name, "arguments": args})
+    return calls
+
+
+
 @dataclass(slots=True)
 class LFM3ParsedOutput:
     """Kết quả bóc tách chuẩn hóa từ văn bản sinh ra của LFM3-1.7B."""
@@ -123,8 +157,11 @@ def parse_lfm3_response(raw_text: str) -> LFM3ParsedOutput:
         if bracket_match:
             json_candidate = bracket_match.group(1).strip()
 
+    # Chuẩn hóa loại bỏ comments và trailing commas trước khi parse
+    cleaned_candidate = sanitize_json_text(json_candidate)
+
     try:
-        parsed_json = json.loads(json_candidate)
+        parsed_json = json.loads(cleaned_candidate)
         brief_plan: str | None = None
         tool_calls = []
 
@@ -159,7 +196,17 @@ def parse_lfm3_response(raw_text: str) -> LFM3ParsedOutput:
                 is_out_of_scope=(len(tool_calls) == 0),
             )
     except (json.JSONDecodeError, ValueError, TypeError):
-        pass
+        # Fallback 1: Trích xuất từng tool call bằng regex nếu JSON bị vỡ cú pháp toàn thể
+        fallback_calls = extract_tool_calls_fallback(text)
+        if fallback_calls:
+            return LFM3ParsedOutput(
+                raw_text=raw_text,
+                thinking_content=thinking_content,
+                tool_calls=fallback_calls,
+                parse_format="json_regex_fallback",
+                is_out_of_scope=False,
+            )
+
 
     # 5. Fallback: Kiểm tra xem có phải yêu cầu ngoài phạm vi (Out-of-scope) hay không
     out_of_scope_cues = [
