@@ -61,12 +61,12 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None, help="Giới hạn số mẫu thực thi")
     parser.add_argument("--offset", type=int, default=0, help="Vị trí mẫu bắt đầu")
     parser.add_argument("--device", type=str, default=None, help="Thiết bị tính toán: cuda hoặc cpu")
-    parser.add_argument("--model-id", type=str, default="LiquidAI/LFM3-1.7B", help="ID mô hình Hugging Face")
+    parser.add_argument("--model-id", type=str, default="LiquidAI/LFM3-1.7B", help="ID mô hình Hugging Face (ví dụ: 'LiquidAI/LFM3-1.7B' hoặc 'Qwen/Qwen3.5-4B')")
     parser.add_argument("--real-model", action="store_true", help="Bật nạp mô hình thật trên GPU (thay vì mock)")
     parser.add_argument("--asr-cache", type=str, default="data/cache/asr_cache.parquet", help="Đường dẫn ASR cache parquet")
     parser.add_argument("--max-react-steps", type=int, default=4, help="Số bước ReAct tối đa cho mỗi mẫu")
     parser.add_argument("--debug", action="store_true", help="In chi tiết raw output và tool calls của từng mẫu để debug")
-    parser.add_argument("--enable-thinking", action="store_true", help="Bật cơ chế suy luận <think> của LFM3")
+    parser.add_argument("--enable-thinking", action="store_true", help="Bật cơ chế suy luận <think> (đặc biệt hiệu quả với Qwen3.5-4B và LFM3)")
     parser.add_argument("--export-html", type=str, default="logs/agent_debug_dashboard.html", help="Đường dẫn file HTML Visual Debug Dashboard")
 
     args = parser.parse_args()
@@ -129,10 +129,11 @@ def main() -> None:
 
     total_samples = len(samples)
     print("================================================================================")
-    print(" ZALO AI CHALLENGE 2026 - LIFEMATE PIPELINE RUNNER (LFM3-1.7B)")
-    print(f" Split: {split} | Tổng số mẫu: {total_samples}")
+    print(f" ZALO AI CHALLENGE 2026 - LIFEMATE PIPELINE RUNNER ({args.model_id})")
+    print(f" Split: {split} | Tổng số mẫu: {total_samples} | Model: {args.model_id}")
     print(f" Catalog: {catalog_path.name} | Input: {input_path.name}")
     print(f" Chế độ: {'MÔ HÌNH THẬT GPU' if args.real_model else 'FALLBACK / TEST LOCAL'}")
+    print(f" Enable Thinking: {args.enable_thinking}")
     print(f" File nộp bài xuất ra: {args.output_file}")
     print("================================================================================")
 
@@ -152,12 +153,12 @@ def main() -> None:
     output_path = Path(args.output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    debug_report_path = Path("logs/lfm3_debug_report.md")
+    debug_report_path = Path("logs/slm_debug_report.md")
     debug_report_path.parent.mkdir(parents=True, exist_ok=True)
     debug_markdown_lines = [
-        "# BÁO CÁO CHI TIẾT DEBUG MÔ HÌNH LFM3-1.7B (TASK 1: LIFEMATE)",
+        f"# BÁO CÁO CHI TIẾT DEBUG MÔ HÌNH {args.model_id} (TASK 1: LIFEMATE)",
         f"> **Thời gian chạy:** {time.strftime('%Y-%m-%d %H:%M:%S')}  ",
-        f"> **Split:** {split} | **Enable Thinking:** {args.enable_thinking}  ",
+        f"> **Split:** {split} | **Model:** {args.model_id} | **Enable Thinking:** {args.enable_thinking}  ",
         "",
         "---",
     ]

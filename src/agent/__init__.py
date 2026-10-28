@@ -15,6 +15,8 @@ from src.agent.voice_agent import (
     AgentExecutionResult,
     LFM3ModelRunner,
     LFM3VoiceAgent,
+    LifeMateVoiceAgent,
+    SLMModelRunner,
 )
 
 __all__ = [
@@ -23,6 +25,8 @@ __all__ = [
     "LFM3ModelRunner",
     "LFM3ParsedOutput",
     "LFM3VoiceAgent",
+    "LifeMateVoiceAgent",
+    "SLMModelRunner",
     "build_calendar_table",
     "build_prompt_for_sample",
     "build_self_correction_prompt",

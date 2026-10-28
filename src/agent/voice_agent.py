@@ -66,7 +66,7 @@ except ImportError:
 
 
 class StopOnOutputCompletion:
-    """Dừng sinh ngay lập tức khi LFM3 vừa hoàn thành khối JSON hoặc thẻ XML tool call."""
+    """Dừng sinh khi mô hình đã hoàn thành phát sinh công cụ (JSON hoặc XML) và tránh sinh lan man."""
 
     def __init__(self, tokenizer: Any, prompt_len: int) -> None:
         self.tokenizer = tokenizer
@@ -76,14 +76,25 @@ class StopOnOutputCompletion:
         new_ids = input_ids[0, self.prompt_len :]
         if len(new_ids) < 8:
             return False
-        tail_text = self.tokenizer.decode(new_ids[-25:], skip_special_tokens=False)
-        if "</tool_call>" in tail_text:
+        tail_text = self.tokenizer.decode(new_ids[-30:], skip_special_tokens=False)
+        # Đóng khối JSON chuẩn: }\n```
+        if "}\n```" in tail_text or "}\n````" in tail_text or tail_text.endswith("```\n"):
             return True
-        return bool("}\n```" in tail_text or "}\n````" in tail_text or tail_text.endswith("```\n"))
+        # Thẻ đóng XML </tool_call>
+        # Nếu sau </tool_call> mô hình bắt đầu sinh text lan man thông thường (không phải khoảng trắng và không phải <tool_call>)
+        if "</tool_call>" in tail_text:
+            after_tag = tail_text.split("</tool_call>")[-1]
+            if len(after_tag.strip()) > 15 and "<tool_call" not in after_tag:
+                return True
+        return False
 
 
-class LFM3ModelRunner:
-    """Bộ thực thi suy luận GPU / CPU cho LiquidAI/LFM3-1.7B."""
+class SLMModelRunner:
+    """Bộ thực thi suy luận GPU / CPU cho các mô hình SLM (< 5B parameters):
+    - Hỗ trợ LiquidAI/LFM3-1.7B
+    - Hỗ trợ Qwen/Qwen3.5-4B (AutoModelForImageTextToText / AutoModelForCausalLM)
+    - Tự động nạp kiến trúc tương thích và cấu hình device_map / bfloat16 tối ưu.
+    """
 
     def __init__(
         self,
@@ -113,23 +124,38 @@ class LFM3ModelRunner:
             self.load()
 
     def load(self) -> None:
-        """Nạp tokenizer và trọng số mô hình."""
+        """Nạp tokenizer và trọng số mô hình tương thích kiến trúc của model."""
         if self._is_loaded:
             return
 
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
         print(f"[*] Đang nạp mô hình '{self.model_id}' (device: {self.device}, dtype: {self.torch_dtype})...", flush=True)
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_id, trust_remote_code=True)
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_id,
-            torch_dtype=self.torch_dtype,
-            device_map="auto" if self.device == "cuda" and torch.cuda.is_available() else None,
-            trust_remote_code=True,
-        )
+        model_kwargs: dict[str, Any] = {
+            "torch_dtype": self.torch_dtype,
+            "device_map": "auto" if self.device == "cuda" and torch.cuda.is_available() else None,
+            "trust_remote_code": True,
+        }
+
+        loaded_model = None
+        # Tự động chọn AutoModel class tương thích kiến trúc (ví dụ Qwen3.5 là ConditionalGeneration)
+        try:
+            cfg = AutoConfig.from_pretrained(self.model_id, trust_remote_code=True)
+            archs = getattr(cfg, "architectures", []) or []
+            if any("ConditionalGeneration" in a or "Multimodal" in a or "Vision2Seq" in a for a in archs):
+                from transformers import AutoModelForImageTextToText
+                loaded_model = AutoModelForImageTextToText.from_pretrained(self.model_id, **model_kwargs)
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+        if loaded_model is None:
+            loaded_model = AutoModelForCausalLM.from_pretrained(self.model_id, **model_kwargs)
+
+        self.model = loaded_model
         if self.device == "cpu" or not torch.cuda.is_available():
             self.model = self.model.to("cpu")
         self.model.eval()
@@ -483,3 +509,9 @@ class LFM3VoiceAgent:
         if not gold_calls:
             return "{\"brief_plan\": \"Yêu cầu ngoài phạm vi.\", \"tool_calls\": []}"
         return f"```json\n{json.dumps({'brief_plan': 'Thực thi tác vụ', 'tool_calls': gold_calls}, ensure_ascii=False)}\n```"
+
+
+# Aliases để hỗ trợ đa mô hình (LFM3-1.7B, Qwen3.5-4B) mà vẫn giữ tương thích ngược 100%
+LFM3ModelRunner = SLMModelRunner
+LifeMateVoiceAgent = LFM3VoiceAgent
+
