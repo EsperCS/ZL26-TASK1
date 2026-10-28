@@ -70,7 +70,6 @@ class CandidateConfig:
     chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
     total_params_b: float = 4.0
     active_params_b: float = 4.0
-    actual_model_id: str | None = None
 
 
 CANDIDATE_REGISTRY: list[CandidateConfig] = [
@@ -82,7 +81,6 @@ CANDIDATE_REGISTRY: list[CandidateConfig] = [
         chat_template_kwargs={"enable_thinking": True},
         total_params_b=4.0,
         active_params_b=4.0,
-        actual_model_id="Qwen/Qwen2.5-3B-Instruct",
     ),
     CandidateConfig(
         name="Qwen3.5-4B (No Thinking)",
@@ -92,7 +90,6 @@ CANDIDATE_REGISTRY: list[CandidateConfig] = [
         chat_template_kwargs={"enable_thinking": False},
         total_params_b=4.0,
         active_params_b=4.0,
-        actual_model_id="Qwen/Qwen2.5-3B-Instruct",
     ),
     CandidateConfig(
         name="Qwen3-4B-2507 (Thinking)",
@@ -103,7 +100,6 @@ CANDIDATE_REGISTRY: list[CandidateConfig] = [
         chat_template_kwargs={"enable_thinking": True},
         total_params_b=4.0,
         active_params_b=4.0,
-        actual_model_id="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
     ),
     CandidateConfig(
         name="Qwen3-4B-2507 (No Thinking)",
@@ -114,7 +110,6 @@ CANDIDATE_REGISTRY: list[CandidateConfig] = [
         chat_template_kwargs={"enable_thinking": False},
         total_params_b=4.0,
         active_params_b=4.0,
-        actual_model_id="Qwen/Qwen2.5-Coder-3B-Instruct",
     ),
     CandidateConfig(
         name="LiquidAI-LFM3-1.7B (Thinking)",
@@ -126,7 +121,6 @@ CANDIDATE_REGISTRY: list[CandidateConfig] = [
         chat_template_kwargs={"enable_thinking": True},
         total_params_b=1.7,
         active_params_b=1.7,
-        actual_model_id="Qwen/Qwen2.5-1.5B-Instruct",
     ),
 ]
 
@@ -248,11 +242,20 @@ class RealSLMRunner:
         top_p: float | None = None,
         top_k: int | None = None,
         repetition_penalty: float | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
         max_new_tokens: int = 1024,
     ) -> tuple[ParsedThinkingOutput, float]:
         t0 = time.perf_counter()
 
+        chat_kwargs = dict(chat_template_kwargs or {})
         try:
+            prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                **chat_kwargs,
+            )
+        except TypeError:
             prompt = self.tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
@@ -454,7 +457,7 @@ def run_benchmark(
 
         runner: RealSLMRunner | None = None
         if not mock_mode:
-            target_model = cand.actual_model_id or cand.model_id
+            target_model = cand.model_id
             try:
                 device_str = "cuda" if torch.cuda.is_available() else "cpu"
                 runner = RealSLMRunner(target_model, device=device_str)
@@ -493,6 +496,7 @@ def run_benchmark(
                             top_p=cand.top_p,
                             top_k=cand.top_k,
                             repetition_penalty=cand.repetition_penalty,
+                            chat_template_kwargs=cand.chat_template_kwargs,
                         )
                     except Exception as e:  # noqa: BLE001
                         print(f"[!] Lỗi khi sinh output mẫu {idx}: {e}")
@@ -625,9 +629,8 @@ def main() -> None:
                 model_id=args.model_id,
                 thinking_mode=think,
                 temperature=0.0,
-                total_params_b=3.09,
-                active_params_b=3.09,
-                actual_model_id=args.model_id,
+                total_params_b=4.0,
+                active_params_b=4.0,
             )
         ]
     elif args.candidate:
