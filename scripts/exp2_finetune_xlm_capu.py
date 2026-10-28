@@ -375,12 +375,15 @@ def train_capu_model(
                     optimizer.zero_grad()
                     scheduler.step()
             else:
+                scale_before = scaler.get_scale()
                 scaler.scale(loss).backward()
                 if step % grad_accum == 0 or step == len(dataloader):
                     scaler.step(optimizer)
                     scaler.update()
+                    scale_after = scaler.get_scale()
+                    if scale_before <= scale_after:
+                        scheduler.step()
                     optimizer.zero_grad()
-                    scheduler.step()
 
             loss_val = float(loss.item() * grad_accum)
             epoch_losses.append(loss_val)
@@ -451,7 +454,7 @@ def evaluate_capu_comparison(
     base_durs: list[float] = []
     base_infers: list[float] = []
 
-    for item in val_items:
+    for idx, item in enumerate(val_items, start=1):
         rel_audio = item["audio"]
         audio_file = next(
             (p for p in [data_dir / rel_audio, Path(rel_audio), Path("train") / rel_audio] if p.exists()),
@@ -464,6 +467,8 @@ def evaluate_capu_comparison(
         base_preds.append(res.final_text)
         base_durs.append(res.duration_sec)
         base_infers.append(res.inference_time_sec)
+        if idx % 50 == 0 or idx == len(val_items):
+            print(f"  [Baseline Capu] Tiến độ: {idx}/{len(val_items)} ({idx / len(val_items) * 100:.1f}%)")
 
     m_base = compute_corpus_metrics(base_gold, base_preds, base_durs, base_infers)
 
@@ -478,7 +483,7 @@ def evaluate_capu_comparison(
     ft_preds: list[str] = []
     ft_infers: list[float] = []
 
-    for item in val_items:
+    for idx, item in enumerate(val_items, start=1):
         rel_audio = item["audio"]
         audio_file = next(
             (p for p in [data_dir / rel_audio, Path(rel_audio), Path("train") / rel_audio] if p.exists()),
@@ -489,6 +494,8 @@ def evaluate_capu_comparison(
         res = pipe_ft.transcribe(audio_file)
         ft_preds.append(res.final_text)
         ft_infers.append(res.inference_time_sec)
+        if idx % 50 == 0 or idx == len(val_items):
+            print(f"  [Fine-tuned Capu] Tiến độ: {idx}/{len(val_items)} ({idx / len(val_items) * 100:.1f}%)")
 
     m_ft = compute_corpus_metrics(base_gold, ft_preds, base_durs, ft_infers)
 

@@ -268,9 +268,9 @@ class SherpaXLMPipeline:
         model_path = Path(model_name_or_dir)
         vad_path = Path(vad_model_path)
 
-        # 1. Khởi tạo Silero VAD (Sherpa-ONNX)
-        if not vad_path.exists():
-            raise FileNotFoundError(f"Không tìm thấy file VAD tại: {vad_path}")
+        # 1. Khởi tạo Silero VAD (Sherpa-ONNX, tự động tải nếu thiếu)
+        if not vad_path.exists() or vad_path.stat().st_size < 500_000:
+            self._ensure_vad_file(vad_path)
 
         silero_config = sherpa_onnx.SileroVadModelConfig(
             model=str(vad_path),
@@ -303,10 +303,75 @@ class SherpaXLMPipeline:
                 self.capu_model = capu_model
             elif capu_model_dir:
                 capu_path = Path(capu_model_dir)
-                if capu_path.exists() and (capu_path / "pytorch_model.bin").exists():
+                has_weights = (
+                    (capu_path / "pytorch_model.bin").exists()
+                    or (capu_path / "model.safetensors").exists()
+                    or any(capu_path.glob("*.safetensors"))
+                )
+                if capu_path.exists() and has_weights:
                     self.capu_model = self._init_capu_model(capu_path, device=device)
                 else:
                     print(f"[CẢNH BÁO] Chưa tìm thấy đầy đủ weights Capu tại {capu_path}. Tạm tắt tầng Capu.")
+
+    @staticmethod
+    def _ensure_vad_file(vad_path: Path) -> Path:
+        """Tự động kiểm tra và tải silero_vad.onnx nếu chưa tồn tại cục bộ."""
+        if vad_path.exists() and vad_path.stat().st_size > 500_000:
+            return vad_path
+
+        vad_path.parent.mkdir(parents=True, exist_ok=True)
+        url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
+        print(f"[AUTO-DOWNLOAD] Đang tải silero_vad.onnx từ {url} về '{vad_path.resolve()}'...")
+        try:
+            import urllib.request
+
+            urllib.request.urlretrieve(url, str(vad_path))
+            print(f"[THÀNH CÔNG] Đã tải silero_vad.onnx ({vad_path.stat().st_size} bytes)")
+        except Exception as e:
+            raise FileNotFoundError(
+                f"Không tìm thấy file VAD tại {vad_path} và không thể tự động tải từ {url}: {e}"
+            ) from e
+        return vad_path
+
+    @staticmethod
+    def _ensure_transducer_model(model_dir: Path) -> None:
+        """Tự động kiểm tra và tải mô hình ZipFormer hoặc Gipformer từ Hugging Face nếu thiếu."""
+        model_dir.mkdir(parents=True, exist_ok=True)
+        onnx_files = [f for f in model_dir.iterdir() if f.suffix == ".onnx"] if model_dir.exists() else []
+        if onnx_files:
+            cfg = model_dir / "config.json"
+            tok = model_dir / "tokens.txt"
+            if cfg.exists() and not tok.exists():
+                import shutil
+
+                shutil.copy(cfg, tok)
+            return
+
+        model_name = str(model_dir).lower()
+        if "gipformer" in model_name:
+            repo_id = "g-group-ai-lab/gipformer1.5-68M-rnnt"
+        else:
+            repo_id = "hynt/ZipFormer-150M-CR-CTC-RNNT-6000h"
+
+        print(f"[AUTO-DOWNLOAD] Đang tải mô hình Transducer '{repo_id}' về '{model_dir.resolve()}'...")
+        try:
+            from huggingface_hub import snapshot_download
+
+            snapshot_download(
+                repo_id=repo_id,
+                local_dir=str(model_dir),
+                allow_patterns=["*.onnx", "config.json", "tokens.txt", "bpe.model", "README.md"],
+                resume_download=True,
+            )
+            cfg = model_dir / "config.json"
+            tok = model_dir / "tokens.txt"
+            if cfg.exists() and not tok.exists():
+                import shutil
+
+                shutil.copy(cfg, tok)
+            print(f"[THÀNH CÔNG] Đã tải hoàn tất mô hình Transducer '{repo_id}'")
+        except Exception as e:  # noqa: BLE001
+            print(f"[CẢNH BÁO] Không thể tự động tải mô hình Transducer {repo_id}: {e}")
 
     def _init_transducer_recognizer(
         self,
@@ -317,6 +382,8 @@ class SherpaXLMPipeline:
         provider: str = "cpu",
     ) -> sherpa_onnx.OfflineRecognizer:
         """Tìm file ONNX và khởi tạo sherpa_onnx.OfflineRecognizer (hỗ trợ hotwords context biasing)."""
+        self._ensure_transducer_model(model_dir)
+
         files = list(model_dir.iterdir())
         onnx_files = [f for f in files if f.suffix == ".onnx"]
 
@@ -374,7 +441,15 @@ class SherpaXLMPipeline:
                     recognizer_kwargs["bpe_vocab"] = str(bpe_vocab)
                     recognizer_kwargs["modeling_unit"] = "bpe"
 
-        recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(**recognizer_kwargs)
+        try:
+            recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(**recognizer_kwargs)
+        except Exception as e:
+            if provider != "cpu":
+                print(f"[CẢNH BÁO] Sherpa-ONNX không hỗ trợ provider='{provider}' ({e}). Tự động fallback về 'cpu'.")
+                recognizer_kwargs["provider"] = "cpu"
+                recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(**recognizer_kwargs)
+            else:
+                raise
         return recognizer
 
     def _init_capu_model(self, capu_dir: Path, device: str) -> Any:
