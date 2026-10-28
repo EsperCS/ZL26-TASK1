@@ -22,6 +22,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 # Đảm bảo UTF-8 cho console
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
@@ -34,6 +35,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.agent.voice_agent import LFM3ModelRunner, LFM3VoiceAgent
+from src.eval.visual_debugger import save_dashboard
 
 
 def load_asr_cache(parquet_path: Path) -> dict[str, str]:
@@ -65,6 +67,7 @@ def main() -> None:
     parser.add_argument("--max-react-steps", type=int, default=4, help="Số bước ReAct tối đa cho mỗi mẫu")
     parser.add_argument("--debug", action="store_true", help="In chi tiết raw output và tool calls của từng mẫu để debug")
     parser.add_argument("--enable-thinking", action="store_true", help="Bật cơ chế suy luận <think> của LFM3")
+    parser.add_argument("--export-html", type=str, default="logs/agent_debug_dashboard.html", help="Đường dẫn file HTML Visual Debug Dashboard")
 
     args = parser.parse_args()
 
@@ -161,6 +164,7 @@ def main() -> None:
 
     match_count = 0
     total_evaluated = 0
+    debug_records: list[dict[str, Any]] = []
     t_start = time.perf_counter()
 
     with open(output_path, "w", encoding="utf-8") as out_f:
@@ -209,6 +213,25 @@ def main() -> None:
                     status_str = " | Tool Sequence: [✓] (State diff)"
                 else:
                     status_str = f" | Calls: {len(res.tool_calls)}/{len(g_calls)}"
+
+            debug_records.append({
+                "idx": idx,
+                "sample_id": s_id,
+                "transcript": transcript,
+                "user_profile": sample.get("context", {}).get("user_profile", {}),
+                "installed_apps": list(sample.get("context", {}).get("installed_apps", {}).keys()),
+                "raw_model_response": res.raw_model_response,
+                "model_tool_calls": res.tool_calls,
+                "gold_tool_calls": g_calls,
+                "model_state_hash": res.state_hash,
+                "gold_state_hash": gold_hash,
+                "call_match": call_match,
+                "hash_match": hash_match,
+                "steps_taken": res.steps_taken,
+                "validation_retries": res.validation_retries,
+                "validation_logs": res.validation_logs,
+                "execution_time_ms": res.execution_time_ms,
+            })
 
             # Chế độ Debug hiển thị toàn bộ chi tiết cho người dùng
             should_debug = args.debug or (total_samples <= 20)
@@ -281,6 +304,10 @@ def main() -> None:
     # Lưu file báo cáo debug
     with open(debug_report_path, "w", encoding="utf-8") as df_out:
         df_out.write("\n".join(debug_markdown_lines))
+
+    if args.export_html and debug_records:
+        dashboard_path = save_dashboard(debug_records, Path(args.export_html))
+        print(f"[✓] Đã xuất Visual Debug Dashboard tại: {dashboard_path.resolve()}")
 
     total_time = time.perf_counter() - t_start
     print("================================================================================")

@@ -54,3 +54,19 @@ def test_parser_with_broken_outer_json_regex_fallback() -> None:
     assert len(parsed.tool_calls) == 2
     assert parsed.tool_calls[0]["name"] == "robot_vacuum.start"
     assert parsed.tool_calls[1]["name"] == "tasks.add"
+
+
+def test_detect_placeholder_arguments() -> None:
+    from src.agent.lfm3_parser import tool_call_has_placeholder
+
+    call_with_placeholder = {
+        "name": "medication.log_taken",
+        "arguments": {"schedule_id": "<sẽ lấy từ medication.list>", "time": "17:00"},
+    }
+    call_valid = {
+        "name": "medication.log_taken",
+        "arguments": {"schedule_id": "med_57", "time": "17:00"},
+    }
+    assert tool_call_has_placeholder(call_with_placeholder) is True
+    assert tool_call_has_placeholder(call_valid) is False
+

@@ -252,6 +252,17 @@ class ContextBuilder:
             "  ]\n"
             "}\n"
             "```\n\n"
+            "### VÍ DỤ MINH HỌA MẪU CHUẨN (FEW-SHOT EXEMPLARS):\n"
+            "- Ví dụ 1 (Đọc trước - Ghi sau):\n"
+            "  * Lệnh: \"Nhắn sếp Dũng mai em đến muộn nhé\"\n"
+            "  * Bước 1 xuất tool đọc: `{\"brief_plan\": \"Tìm Sếp Dũng trong danh bạ\", \"tool_calls\": [{\"name\": \"contacts.search\", \"arguments\": {\"query\": \"Sếp Dũng\"}}]}`\n"
+            "  * Sau khi có [OBSERVATION] trả về contact_id=\"c_08\" -> Bước 2: `{\"brief_plan\": \"Gửi tin nhắn cho sếp\", \"tool_calls\": [{\"name\": \"sms.send\", \"arguments\": {\"contact_id\": \"c_08\", \"content\": \"mai em đến muộn nhé\"}}]}`\n"
+            "- Ví dụ 2 (Hỏi thông tin thiếu sys.ask_missing_info):\n"
+            "  * Lệnh: \"Mở phòng họp online lúc 3 giờ chiều nay\"\n"
+            "  * Xuất: `{\"brief_plan\": \"Thiếu tiêu đề cuộc họp\", \"tool_calls\": [{\"name\": \"sys.ask_missing_info\", \"arguments\": {\"tool_name\": \"video_meeting.create\", \"params\": [\"title\"]}}]}`\n"
+            "- Ví dụ 3 (Yêu cầu ngoài phạm vi / chưa cài app):\n"
+            "  * Lệnh: \"Đặt vé máy bay đi Đà Nẵng\" (app flights chưa cài đặt)\n"
+            "  * Xuất: `{\"brief_plan\": \"Ứng dụng đặt vé máy bay chưa cài đặt\", \"tool_calls\": []}`\n\n"
             f"{thinking_instruction}"
         )
 

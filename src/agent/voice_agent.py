@@ -22,7 +22,11 @@ from typing import Any
 import torch
 
 from src.agent.context_builder import ContextBuilder, build_self_correction_prompt
-from src.agent.lfm3_parser import LFM3ParsedOutput, parse_lfm3_response
+from src.agent.lfm3_parser import (
+    LFM3ParsedOutput,
+    parse_lfm3_response,
+    tool_call_has_placeholder,
+)
 
 # Dynamic import cho zaic_tools với tìm kiếm mở rộng đa tầng
 try:
@@ -59,6 +63,23 @@ except ImportError:
         raise ImportError(
             "Không tìm thấy gói thư viện 'zaic_tools'. Hãy đảm bảo 'zaic_tools' nằm trong repo hoặc giải nén train+public_test.zip."
         ) from e
+
+
+class StopOnOutputCompletion:
+    """Dừng sinh ngay lập tức khi LFM3 vừa hoàn thành khối JSON hoặc thẻ XML tool call."""
+
+    def __init__(self, tokenizer: Any, prompt_len: int) -> None:
+        self.tokenizer = tokenizer
+        self.prompt_len = prompt_len
+
+    def __call__(self, input_ids: torch.LongTensor, scores: Any, **kwargs: Any) -> bool:
+        new_ids = input_ids[0, self.prompt_len :]
+        if len(new_ids) < 8:
+            return False
+        tail_text = self.tokenizer.decode(new_ids[-25:], skip_special_tokens=False)
+        if "</tool_call>" in tail_text:
+            return True
+        return bool("}\n```" in tail_text or "}\n````" in tail_text or tail_text.endswith("```\n"))
 
 
 class LFM3ModelRunner:
@@ -173,6 +194,22 @@ class LFM3ModelRunner:
         }
         if temperature > 0.0:
             gen_kwargs["temperature"] = temperature
+
+        try:
+            from transformers import StoppingCriteria, StoppingCriteriaList
+
+            class HFStoppingCriteriaWrapper(StoppingCriteria):
+                def __init__(self, inner: StopOnOutputCompletion) -> None:
+                    self.inner = inner
+
+                def __call__(self, input_ids: torch.LongTensor, scores: Any, **kwargs: Any) -> bool:
+                    return self.inner(input_ids, scores, **kwargs)
+
+            gen_kwargs["stopping_criteria"] = StoppingCriteriaList(
+                [HFStoppingCriteriaWrapper(StopOnOutputCompletion(self.tokenizer, input_ids.shape[1]))]
+            )
+        except Exception:  # noqa: BLE001, S110
+            pass
 
         with torch.inference_mode():
             output_ids = self.model.generate(
@@ -337,11 +374,24 @@ class LFM3VoiceAgent:
             if not parsed.tool_calls or parsed.is_out_of_scope:
                 break
 
+            # Lọc bỏ các tool call chứa placeholder ảo giác (như <sẽ lấy từ...>)
+            valid_tool_calls: list[dict[str, Any]] = []
+            for tc in parsed.tool_calls:
+                if tool_call_has_placeholder(tc):
+                    validation_logs.append(
+                        f"Step {step} - Chặn `{tc.get('name')}` vì chứa placeholder ảo giác: {tc.get('arguments')}"
+                    )
+                else:
+                    valid_tool_calls.append(tc)
+
+            if not valid_tool_calls:
+                break
+
             # Thực thi danh sách tool calls đã sinh ra
             turn_has_observations = False
             new_calls_executed = 0
 
-            for tool_call in parsed.tool_calls:
+            for tool_call in valid_tool_calls:
                 fn_name = tool_call.get("name", "")
                 fn_args = tool_call.get("arguments", {})
 

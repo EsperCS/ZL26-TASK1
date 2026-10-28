@@ -70,6 +70,34 @@ def extract_tool_calls_fallback(text: str) -> list[dict[str, Any]]:
     return calls
 
 
+def has_placeholder_value(val: Any) -> bool:
+    """Kiểm tra xem giá trị tham số có phải là placeholder ảo giác hay không."""
+    if isinstance(val, str):
+        v = val.strip().lower()
+        if (
+            (v.startswith("<") and v.endswith(">"))
+            or "sẽ lấy từ" in v
+            or "lấy từ " in v
+            or "chưa có" in v
+            or v in {"placeholder", "dummy", "unknown", "todo", "<none>"}
+        ):
+            return True
+    elif isinstance(val, list):
+        return any(has_placeholder_value(x) for x in val)
+    elif isinstance(val, dict):
+        return any(has_placeholder_value(x) for x in val.values())
+    return False
+
+
+def tool_call_has_placeholder(tool_call: dict[str, Any]) -> bool:
+    """Kiểm tra xem tool call có chứa tham số giữ chỗ không hợp lệ hay không."""
+    args = tool_call.get("arguments", {})
+    if isinstance(args, dict):
+        return any(has_placeholder_value(v) for v in args.values())
+    return False
+
+
+
 
 @dataclass(slots=True)
 class LFM3ParsedOutput:
