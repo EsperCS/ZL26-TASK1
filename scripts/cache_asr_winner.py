@@ -51,9 +51,10 @@ def collect_unique_audio_tasks(
 ) -> list[dict[str, str]]:
     """Quét và gom toàn bộ audio chính và audio history từ train và public_test."""
     manifest_sources = [
+        # 1. Thư mục cục bộ chuẩn
         ("train", data_dir / "train" / "train.jsonl", data_dir / "train"),
         ("public_test", data_dir / "public_test" / "public_test.jsonl", data_dir / "public_test"),
-        # Fallback thư mục ghép train+public_test
+        # 2. Thư mục ghép train+public_test
         (
             "train",
             data_dir / "train+public_test" / "train" / "train.jsonl",
@@ -63,6 +64,48 @@ def collect_unique_audio_tasks(
             "public_test",
             data_dir / "train+public_test" / "public_test" / "public_test.jsonl",
             data_dir / "train+public_test" / "public_test",
+        ),
+        # 3. Thư mục data/task1_lifemate
+        (
+            "train",
+            data_dir / "data" / "task1_lifemate" / "train+public_test" / "train" / "train.jsonl",
+            data_dir / "data" / "task1_lifemate" / "train+public_test" / "train",
+        ),
+        (
+            "public_test",
+            data_dir / "data" / "task1_lifemate" / "train+public_test" / "public_test" / "public_test.jsonl",
+            data_dir / "data" / "task1_lifemate" / "train+public_test" / "public_test",
+        ),
+        # 4. Các vị trí phổ biến trên Google Colab
+        (
+            "train",
+            Path("/content/train+public_test/train/train.jsonl"),
+            Path("/content/train+public_test/train"),
+        ),
+        (
+            "public_test",
+            Path("/content/train+public_test/public_test/public_test.jsonl"),
+            Path("/content/train+public_test/public_test"),
+        ),
+        (
+            "train",
+            Path("/content/data/task1_lifemate/train+public_test/train/train.jsonl"),
+            Path("/content/data/task1_lifemate/train+public_test/train"),
+        ),
+        (
+            "public_test",
+            Path("/content/data/task1_lifemate/train+public_test/public_test/public_test.jsonl"),
+            Path("/content/data/task1_lifemate/train+public_test/public_test"),
+        ),
+        (
+            "train",
+            Path("/content/drive/MyDrive/ZaloAI_2026_ASR/train+public_test/train/train.jsonl"),
+            Path("/content/drive/MyDrive/ZaloAI_2026_ASR/train+public_test/train"),
+        ),
+        (
+            "public_test",
+            Path("/content/drive/MyDrive/ZaloAI_2026_ASR/train+public_test/public_test/public_test.jsonl"),
+            Path("/content/drive/MyDrive/ZaloAI_2026_ASR/train+public_test/public_test"),
         ),
     ]
 
@@ -197,6 +240,16 @@ def run_cache_asr(
     tasks = collect_unique_audio_tasks(data_dir)
     print(f"[*] Tổng số file audio cần xử lý (Unique): {len(tasks)}")
 
+    if not tasks:
+        print("\n[!] LỖI: Không tìm thấy bất kỳ file audio nào từ các manifest JSONL!")
+        print("    Nguyên nhân: Thư mục `train/` hoặc `public_test/` (chứa train.jsonl và audio/) chưa có mặt.")
+        print("    Các file âm thanh nặng nằm trong .gitignore nên khi git clone sẽ không có sẵn.")
+        print("    Hướng dẫn khắc phục trên Google Colab:")
+        print("    1. Nếu bạn có file `train+public_test.zip` trên Google Drive, hãy giải nén bằng cell:")
+        print("       !unzip -q /content/drive/MyDrive/ZaloAI_2026_ASR/train+public_test.zip -d /content/zaloai-challenge-2026/")
+        print("    2. Hoặc trỏ tham số `--data-dir /content/drive/MyDrive/...` đến đúng nơi lưu dataset.")
+        return
+
     # 2. Nạp cache cũ
     cache = load_existing_cache(output_parquet, checkpoint_json)
     remaining_tasks = [t for t in tasks if t["audio_path"] not in cache]
@@ -211,7 +264,7 @@ def run_cache_asr(
         return
 
     if not remaining_tasks:
-        print("[✓] Toàn bộ audio đã được phiên âm đầy đủ! Xuất file parquet cuối cùng...")
+        print(f"[✓] Toàn bộ {len(tasks)} audio đã được phiên âm đầy đủ trong cache! Xuất file parquet cuối cùng...")
         save_checkpoint(list(cache.values()), output_parquet, checkpoint_json)
         print(f"[✓] Thành công: {output_parquet} ({len(cache)} rows)")
         return
