@@ -303,26 +303,26 @@ def main() -> None:
     hotwords_file = models_dir / "zalo_hotwords.txt"
     capu_ft_dir = models_dir / "xlm-roberta-capu-zalo-ft"
     capu_base_dir = models_dir / "xlm-roberta-capu"
-    drive_backup_capu = Path("/content/drive/MyDrive/zaloai_asr_backup/xlm-roberta-capu-zalo-ft")
+    
+    # Danh sách các đường dẫn dự phòng trên Google Drive đã sao lưu
+    drive_candidates = [
+        Path("/content/drive/MyDrive/ZaloAI_2026_ASR/xlm-roberta-capu-zalo-ft"),
+        Path("/content/drive/MyDrive/zaloai_asr_backup/xlm-roberta-capu-zalo-ft"),
+    ]
+    drive_backup_capu = next((p for p in drive_candidates if p.exists()), None)
+
+    def has_valid_weights(p: Path) -> bool:
+        return (p / "model.safetensors").exists() or (p / "pytorch_model.bin").exists()
 
     # Tự động nạp bản fine-tuned từ Drive nếu phiên Colab bị khởi động lại
-    if (
-        not (capu_ft_dir / "pytorch_model.bin").exists()
-        and (drive_backup_capu / "pytorch_model.bin").exists()
-    ):
+    if not has_valid_weights(capu_ft_dir) and drive_backup_capu and has_valid_weights(drive_backup_capu):
         print(f"[RESTORE] Phát hiện Capu Fine-Tuned trên Google Drive! Đang khôi phục từ {drive_backup_capu}...")
         import shutil
 
         shutil.copytree(drive_backup_capu, capu_ft_dir, dirs_exist_ok=True)
 
-    has_ft_weights = (
-        (capu_ft_dir / "pytorch_model.bin").exists()
-        or (capu_ft_dir / "model.safetensors").exists()
-    )
-    has_base_weights = (
-        (capu_base_dir / "pytorch_model.bin").exists()
-        or (capu_base_dir / "model.safetensors").exists()
-    )
+    has_ft_weights = has_valid_weights(capu_ft_dir)
+    has_base_weights = has_valid_weights(capu_base_dir)
 
     if has_ft_weights:
         capu_dir = capu_ft_dir

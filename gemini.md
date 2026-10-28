@@ -11,3 +11,10 @@
 3. CẤM gọi trực tiếp `env.call(name, args)` khi chưa kiểm tra qua `env.validate(name, args)`. Nếu `env.validate()` báo lỗi (`ok == False`), phải trả lỗi về cho Agent sửa, không được đẩy vào `env.call()`.
 4. CẤM gọi bất kỳ API internet nào trong luồng inference (container chạy ở chế độ offline `--network none`).
 5. CẤM tự ý sửa file chấm điểm `src/eval/evaluator.py` sau khi đã chốt.
+
+## 3. Tài nguyên huấn luyện có sẵn trên Google Drive & Hướng dẫn vận hành
+- Toàn bộ checkpoints ASR đã huấn luyện và logs được lưu tại: `Google Drive > ZaloAI_2026_ASR` (`/content/drive/MyDrive/ZaloAI_2026_ASR/`).
+  - Capu Fine-Tuned: `/content/drive/MyDrive/ZaloAI_2026_ASR/xlm-roberta-capu-zalo-ft/model.safetensors` (~1.0 GB).
+  - Logs báo cáo: `/content/drive/MyDrive/ZaloAI_2026_ASR/logs/`.
+- Sổ tay hướng dẫn chi tiết dành cho AI các phiên tiếp theo: xem `docs/COLAB_AI_OPERATIONS_GUIDE.md`.
+- Khi chạy Colab mới, khôi phục bằng lệnh: `python scripts/backup_to_drive.py --action restore --drive-dir /content/drive/MyDrive/ZaloAI_2026_ASR`.
