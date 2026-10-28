@@ -21,6 +21,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -271,12 +272,41 @@ def run_lora_training(
         shutil.rmtree(tmp_adapter_dir, ignore_errors=True)
 
 
+def _ensure_ctranslate2() -> bool:
+    """Kiểm tra hoặc thử tự động cài đặt ctranslate2 & faster-whisper."""
+    import importlib.util
+
+    if importlib.util.find_spec("ctranslate2") is not None:
+        return True
+
+    print("[AUTO-INSTALL] Thư viện ctranslate2 chưa có sẵn. Đang thử cài đặt qua pip...")
+    try:
+        res = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "ctranslate2", "faster-whisper"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode == 0 and importlib.util.find_spec("ctranslate2") is not None:
+            print("[THÀNH CÔNG] Đã cài đặt ctranslate2 và faster-whisper.")
+            return True
+        print(f"[CẢNH BÁO] Không thể cài đặt ctranslate2 qua pip: {res.stderr.strip()[:180]}")
+        return False
+    except Exception as e:  # noqa: BLE001
+        print(f"[CẢNH BÁO] Không thể tự động cài đặt ctranslate2: {e}")
+        return False
+
+
 def convert_merged_to_ct2(
     merged_dir: Path,
     output_ct2_dir: Path,
     quantization: str = "float16",
-) -> None:
-    """Chuyển đổi mô hình Whisper PyTorch sang định dạng CTranslate2."""
+) -> bool:
+    """Chuyển đổi mô hình Whisper PyTorch sang định dạng CTranslate2 nếu có thư viện."""
+    if not _ensure_ctranslate2():
+        print("[THÔNG BÁO] Môi trường chưa có ctranslate2. Sẽ chuyển sang đánh giá trực tiếp qua Transformers.")
+        return False
+
     print(f"\n[CONVERT] Đang chuyển đổi {merged_dir.resolve()} sang CTranslate2 ({quantization})...")
     output_ct2_dir.mkdir(parents=True, exist_ok=True)
 
@@ -299,11 +329,17 @@ def convert_merged_to_ct2(
     try:
         subprocess.run(cmd, check=True)
         print(f"-> Đã chuyển đổi thành công mô hình CTranslate2 tại: {output_ct2_dir.resolve()}")
-    except subprocess.CalledProcessError as e:
+        return True
+    except Exception as e:  # noqa: BLE001
         print(f"[CẢNH BÁO] Lỗi khi chuyển đổi với {quantization}: {e}. Đang thử lại với float32...")
-        cmd[cmd.index(quantization)] = "float32"
-        subprocess.run(cmd, check=True)
-        print(f"-> Đã chuyển đổi thành công mô hình CTranslate2 (float32) tại: {output_ct2_dir.resolve()}")
+        try:
+            cmd[cmd.index(quantization)] = "float32"
+            subprocess.run(cmd, check=True)
+            print(f"-> Đã chuyển đổi thành công mô hình CTranslate2 (float32) tại: {output_ct2_dir.resolve()}")
+            return True
+        except Exception as e2:  # noqa: BLE001
+            print(f"[CẢNH BÁO] Chuyển đổi CTranslate2 không thành công ({e2}). Sẽ fallback sang Transformers evaluation.")
+            return False
 
 
 def evaluate_faster_whisper(
@@ -332,16 +368,18 @@ def evaluate_faster_whisper(
         rel_audio = item["audio"]
         gold_text = item.get("audio_text", "").strip()
 
-        audio_file = next(
-            (p for p in [data_dir / rel_audio, Path(rel_audio), Path("train") / rel_audio] if p.exists()),
-            None,
-        )
+        audio_candidates = [
+            data_dir / rel_audio,
+            data_dir / "train" / rel_audio,
+            Path(rel_audio),
+            Path("train") / rel_audio,
+            Path("train+public_test/train") / rel_audio,
+        ]
+        audio_file = next((p for p in audio_candidates if p.exists()), None)
         if not audio_file:
             continue
 
-        import time
         start_t = time.perf_counter()
-
         segments, info = whisper.transcribe(
             str(audio_file),
             language="vi",
@@ -354,6 +392,96 @@ def evaluate_faster_whisper(
         gold_texts.append(gold_text)
         pred_texts.append(transcription)
         durations.append(info.duration)
+        infer_times.append(elapsed)
+
+        if idx % 50 == 0 or idx == len(val_items):
+            print(f"  [{idx}/{len(val_items)}] Đã đánh giá {len(pred_texts)} mẫu...")
+
+    metrics = compute_corpus_metrics(gold_texts, pred_texts, durations, infer_times)
+    return {
+        "norm_wer": round(metrics.normalized_wer, 2),
+        "raw_wer": round(metrics.raw_wer, 2),
+        "cer": round(metrics.normalized_cer, 2),
+        "exact_match": round(metrics.exact_match_norm_pct, 2),
+        "cap_recall": round(metrics.capitalized_recall_pct, 2),
+        "rtf": round(metrics.real_time_factor, 4),
+        "latency_ms": round(metrics.avg_latency_ms, 1),
+    }
+
+
+def evaluate_transformers_whisper(
+    model_dir: Path,
+    val_items: list[dict[str, Any]],
+    data_dir: Path,
+    device: str = "cuda",
+) -> dict[str, float]:
+    """Đánh giá mô hình PhoASR LoRA merged trực tiếp bằng Transformers nếu thiếu CTranslate2."""
+    torch_device = "cuda" if torch.cuda.is_available() and device == "cuda" else "cpu"
+    compute_dtype = torch.float16 if torch_device == "cuda" else torch.float32
+    print(f"\n[EVAL] Đang nạp mô hình Whisper Transformers từ {model_dir.resolve()} ({torch_device}, {compute_dtype})...")
+
+    processor = WhisperProcessor.from_pretrained(str(model_dir))
+    model = WhisperForConditionalGeneration.from_pretrained(
+        str(model_dir),
+        torch_dtype=compute_dtype,
+    ).to(torch_device)
+    model.eval()
+
+    gold_texts: list[str] = []
+    pred_texts: list[str] = []
+    durations: list[float] = []
+    infer_times: list[float] = []
+
+    for idx, item in enumerate(val_items, start=1):
+        rel_audio = item["audio"]
+        gold_text = item.get("audio_text", "").strip()
+
+        audio_candidates = [
+            data_dir / rel_audio,
+            data_dir / "train" / rel_audio,
+            Path(rel_audio),
+            Path("train") / rel_audio,
+            Path("train+public_test/train") / rel_audio,
+        ]
+        audio_file = next((p for p in audio_candidates if p.exists()), None)
+        if not audio_file:
+            continue
+
+        audio_array, sr = sf.read(str(audio_file), dtype="float32")
+        if audio_array.ndim > 1:
+            audio_array = audio_array.mean(axis=1)
+        dur = float(len(audio_array) / sr)
+
+        if sr != 16000:
+            num_target_samples = int(len(audio_array) * 16000 / sr)
+            audio_array = np.interp(
+                np.linspace(0, len(audio_array), num_target_samples, endpoint=False),
+                np.arange(len(audio_array)),
+                audio_array,
+            ).astype(np.float32)
+
+        start_t = time.perf_counter()
+        input_features = processor.feature_extractor(
+            audio_array,
+            sampling_rate=16000,
+            return_tensors="pt",
+        ).input_features.to(torch_device, dtype=compute_dtype)
+
+        with torch.no_grad():
+            predicted_ids = model.generate(
+                input_features,
+                language="vi",
+                task="transcribe",
+                num_beams=4,
+                do_sample=False,
+                max_new_tokens=256,
+            )
+        transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True)[0].strip()
+        elapsed = time.perf_counter() - start_t
+
+        gold_texts.append(gold_text)
+        pred_texts.append(transcription)
+        durations.append(dur)
         infer_times.append(elapsed)
 
         if idx % 50 == 0 or idx == len(val_items):
@@ -465,19 +593,27 @@ def main() -> None:
     print(f"  - asr_train: {len(asr_train_lines)} mẫu [CHỈ DÙNG HUẤN LUYỆN LORA]")
 
     # 2. Huấn luyện LoRA nếu không bật eval-only
+    has_merged_weights = (
+        (args.tmp_merged_dir / "model.safetensors").exists()
+        or (args.tmp_merged_dir / "pytorch_model.bin").exists()
+    )
     if not args.eval_only:
-        train_items = [json.loads(line) for line in asr_train_lines if line.strip()]
-        run_lora_training(
-            train_items=train_items,
-            model_id=args.model_id,
-            output_merged_dir=args.tmp_merged_dir,
-            data_dir=train_path.parent,
-            epochs=args.epochs,
-            batch_size=args.batch_size,
-            grad_accum=args.grad_accum,
-            learning_rate=args.lr,
-            dry_run=args.dry_run,
-        )
+        if has_merged_weights:
+            print(f"\n[REUSE] Tìm thấy mô hình merged đã có sẵn tại {args.tmp_merged_dir.resolve()}. Bỏ qua training LoRA.")
+        else:
+            train_items = [json.loads(line) for line in asr_train_lines if line.strip()]
+            run_lora_training(
+                train_items=train_items,
+                model_id=args.model_id,
+                output_merged_dir=args.tmp_merged_dir,
+                data_dir=train_path.parent,
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                grad_accum=args.grad_accum,
+                learning_rate=args.lr,
+                dry_run=args.dry_run,
+            )
+
         convert_merged_to_ct2(
             merged_dir=args.tmp_merged_dir,
             output_ct2_dir=args.output_ct2_dir,
@@ -490,13 +626,27 @@ def main() -> None:
         val_items = val_items[: args.limit]
 
     metrics: dict[str, float] | None = None
-    if args.output_ct2_dir.exists():
+    ct2_valid = args.output_ct2_dir.exists() and any(args.output_ct2_dir.glob("*.bin"))
+    if ct2_valid:
         metrics = evaluate_faster_whisper(
             ct2_dir=args.output_ct2_dir,
             val_items=val_items,
             data_dir=train_path.parent,
             device=args.device,
         )
+    elif args.tmp_merged_dir.exists() and (
+        (args.tmp_merged_dir / "model.safetensors").exists()
+        or (args.tmp_merged_dir / "pytorch_model.bin").exists()
+    ):
+        print("\n[EVAL] Đánh giá trực tiếp mô hình PhoASR LoRA merged qua Hugging Face Transformers...")
+        metrics = evaluate_transformers_whisper(
+            model_dir=args.tmp_merged_dir,
+            val_items=val_items,
+            data_dir=train_path.parent,
+            device=args.device,
+        )
+    else:
+        print("[CẢNH BÁO] Không tìm thấy mô hình CT2 hoặc merged để đánh giá.")
 
     # 4. Xuất Bảng xếp hạng chung cuộc
     write_final_leaderboard(args.report_out, phoasr_ft_metrics=metrics)
