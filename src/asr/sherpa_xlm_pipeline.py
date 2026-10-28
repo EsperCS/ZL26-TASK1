@@ -250,11 +250,20 @@ class SherpaXLMPipeline:
         num_threads: int = 4,
         enable_capu: bool = True,
         enable_itn: bool = True,
+        vad_min_silence: float = 0.4,
+        vad_min_speech: float = 0.25,
+        vad_threshold: float = 0.5,
+        hotwords_file: str | Path | None = None,
+        hotwords_score: float = 1.5,
+        provider: str = "cpu",
     ) -> None:
         self.device = device
         self.enable_capu = enable_capu
         self.enable_itn = enable_itn
         self.itn = VietnameseITN()
+        self.hotwords_file = hotwords_file
+        self.hotwords_score = hotwords_score
+        self.provider = provider
 
         model_path = Path(model_name_or_dir)
         vad_path = Path(vad_model_path)
@@ -265,9 +274,9 @@ class SherpaXLMPipeline:
 
         silero_config = sherpa_onnx.SileroVadModelConfig(
             model=str(vad_path),
-            threshold=0.5,
-            min_silence_duration=0.4,
-            min_speech_duration=0.25,
+            threshold=vad_threshold,
+            min_silence_duration=vad_min_silence,
+            min_speech_duration=vad_min_speech,
             window_size=512,
         )
         vad_config = sherpa_onnx.VadModelConfig(
@@ -279,7 +288,13 @@ class SherpaXLMPipeline:
         self.vad_config = vad_config
 
         # 2. Khởi tạo Transducer Offline Recognizer
-        self.recognizer = self._init_transducer_recognizer(model_path, num_threads=num_threads)
+        self.recognizer = self._init_transducer_recognizer(
+            model_path,
+            num_threads=num_threads,
+            hotwords_file=hotwords_file,
+            hotwords_score=hotwords_score,
+            provider=provider,
+        )
 
         # 3. Khởi tạo hoặc tái sử dụng XLM-RoBERTa Capu
         self.capu_model = None
@@ -293,8 +308,15 @@ class SherpaXLMPipeline:
                 else:
                     print(f"[CẢNH BÁO] Chưa tìm thấy đầy đủ weights Capu tại {capu_path}. Tạm tắt tầng Capu.")
 
-    def _init_transducer_recognizer(self, model_dir: Path, num_threads: int) -> sherpa_onnx.OfflineRecognizer:
-        """Tìm file ONNX và khởi tạo sherpa_onnx.OfflineRecognizer."""
+    def _init_transducer_recognizer(
+        self,
+        model_dir: Path,
+        num_threads: int,
+        hotwords_file: str | Path | None = None,
+        hotwords_score: float = 1.5,
+        provider: str = "cpu",
+    ) -> sherpa_onnx.OfflineRecognizer:
+        """Tìm file ONNX và khởi tạo sherpa_onnx.OfflineRecognizer (hỗ trợ hotwords context biasing)."""
         files = list(model_dir.iterdir())
         onnx_files = [f for f in files if f.suffix == ".onnx"]
 
@@ -317,17 +339,42 @@ class SherpaXLMPipeline:
             else:
                 raise FileNotFoundError(f"Không tìm thấy tokens.txt hoặc config.json trong {model_dir}")
 
-        recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
-            encoder=str(encoder),
-            decoder=str(decoder),
-            joiner=str(joiner),
-            tokens=str(tokens),
-            num_threads=num_threads,
-            sample_rate=16000,
-            decoding_method="modified_beam_search",
-            max_active_paths=4,
-            provider="cpu",
-        )
+        # Tự động xuất bpe.vocab nếu model có bpe.model nhưng chưa có file vocab dạng text
+        bpe_model = model_dir / "bpe.model"
+        bpe_vocab = model_dir / "bpe.vocab"
+        if bpe_model.exists() and not bpe_vocab.exists():
+            try:
+                import sentencepiece as spm
+
+                sp = spm.SentencePieceProcessor()
+                sp.load(str(bpe_model))
+                with open(bpe_vocab, "w", encoding="utf-8") as f:
+                    f.writelines(f"{sp.id_to_piece(i)} {sp.get_score(i)}\n" for i in range(sp.get_piece_size()))
+            except Exception as e:  # noqa: BLE001
+                print(f"[CẢNH BÁO] Không thể sinh bpe.vocab từ bpe.model: {e}")
+
+        recognizer_kwargs: dict[str, Any] = {
+            "encoder": str(encoder),
+            "decoder": str(decoder),
+            "joiner": str(joiner),
+            "tokens": str(tokens),
+            "num_threads": num_threads,
+            "sample_rate": 16000,
+            "decoding_method": "modified_beam_search",
+            "max_active_paths": 4,
+            "provider": provider,
+        }
+
+        if hotwords_file:
+            hw_path = Path(hotwords_file)
+            if hw_path.exists():
+                recognizer_kwargs["hotwords_file"] = str(hw_path)
+                recognizer_kwargs["hotwords_score"] = float(hotwords_score)
+                if bpe_vocab.exists():
+                    recognizer_kwargs["bpe_vocab"] = str(bpe_vocab)
+                    recognizer_kwargs["modeling_unit"] = "bpe"
+
+        recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(**recognizer_kwargs)
         return recognizer
 
     def _init_capu_model(self, capu_dir: Path, device: str) -> Any:

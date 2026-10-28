@@ -10,7 +10,9 @@ from scripts.setup_asr_models import (
     PHOASR_SMALL_PARAMS,
     PHOWHISPER_LARGE_PARAMS,
 )
-from src.eval.asr_metrics import normalize_text_for_acoustic_eval as normalize_vietnamese_text
+from src.eval.asr_metrics import (
+    normalize_text_for_acoustic_eval as normalize_vietnamese_text,
+)
 
 
 def test_normalize_vietnamese_text():
