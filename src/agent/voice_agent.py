@@ -24,15 +24,41 @@ import torch
 from src.agent.context_builder import ContextBuilder, build_self_correction_prompt
 from src.agent.lfm3_parser import LFM3ParsedOutput, parse_lfm3_response
 
-# Dynamic import cho zaic_tools
+# Dynamic import cho zaic_tools với tìm kiếm mở rộng đa tầng
 try:
     from zaic_tools import ToolEnv
 except ImportError:
     import sys
-    for p in [Path("train"), Path("public_test"), Path("train+public_test/train")]:
-        if (p / "zaic_tools").is_dir() and str(p.resolve()) not in sys.path:
-            sys.path.insert(0, str(p.resolve()))
-    from zaic_tools import ToolEnv
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    candidate_dirs = [
+        repo_root,
+        repo_root / "zaic_tools",
+        repo_root / "train",
+        repo_root / "public_test",
+        repo_root / "train+public_test" / "train",
+        repo_root / "train+public_test" / "public_test",
+        Path.cwd(),
+        Path.cwd() / "zaic_tools",
+        Path.cwd() / "train",
+        Path.cwd() / "public_test",
+        Path("/content/zaloai-challenge-2026"),
+        Path("/content/zaloai-challenge-2026/zaic_tools"),
+        Path("/content/zaloai-challenge-2026/train"),
+        Path("/content/zaloai-challenge-2026/public_test"),
+        Path("/content/drive/MyDrive/ZaloAI_2026_ASR"),
+    ]
+    for d in candidate_dirs:
+        if (d / "zaic_tools").is_dir() and str(d.resolve()) not in sys.path:
+            sys.path.insert(0, str(d.resolve()))
+        elif (d / "executor.py").is_file() and str(d.parent.resolve()) not in sys.path:
+            sys.path.insert(0, str(d.parent.resolve()))
+
+    try:
+        from zaic_tools import ToolEnv
+    except ImportError as e:
+        raise ImportError(
+            "Không tìm thấy gói thư viện 'zaic_tools'. Hãy đảm bảo 'zaic_tools' nằm trong repo hoặc giải nén train+public_test.zip."
+        ) from e
 
 
 class LFM3ModelRunner:
