@@ -80,8 +80,8 @@ CANDIDATE_REGISTRY: list[CandidateConfig] = [
         thinking_mode=True,
         temperature=0.0,
         chat_template_kwargs={"enable_thinking": True},
-        total_params_b=3.09,
-        active_params_b=3.09,
+        total_params_b=4.0,
+        active_params_b=4.0,
         actual_model_id="Qwen/Qwen2.5-3B-Instruct",
     ),
     CandidateConfig(
@@ -90,8 +90,8 @@ CANDIDATE_REGISTRY: list[CandidateConfig] = [
         thinking_mode=False,
         temperature=0.0,
         chat_template_kwargs={"enable_thinking": False},
-        total_params_b=3.09,
-        active_params_b=3.09,
+        total_params_b=4.0,
+        active_params_b=4.0,
         actual_model_id="Qwen/Qwen2.5-3B-Instruct",
     ),
     CandidateConfig(
@@ -101,8 +101,8 @@ CANDIDATE_REGISTRY: list[CandidateConfig] = [
         temperature=0.6,
         top_p=0.95,
         chat_template_kwargs={"enable_thinking": True},
-        total_params_b=1.78,
-        active_params_b=1.78,
+        total_params_b=4.0,
+        active_params_b=4.0,
         actual_model_id="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
     ),
     CandidateConfig(
@@ -112,8 +112,8 @@ CANDIDATE_REGISTRY: list[CandidateConfig] = [
         temperature=0.7,
         top_p=0.8,
         chat_template_kwargs={"enable_thinking": False},
-        total_params_b=3.09,
-        active_params_b=3.09,
+        total_params_b=4.0,
+        active_params_b=4.0,
         actual_model_id="Qwen/Qwen2.5-Coder-3B-Instruct",
     ),
     CandidateConfig(
@@ -124,8 +124,8 @@ CANDIDATE_REGISTRY: list[CandidateConfig] = [
         top_k=50,
         repetition_penalty=1.1,
         chat_template_kwargs={"enable_thinking": True},
-        total_params_b=1.54,
-        active_params_b=1.54,
+        total_params_b=1.7,
+        active_params_b=1.7,
         actual_model_id="Qwen/Qwen2.5-1.5B-Instruct",
     ),
 ]
@@ -592,7 +592,8 @@ def main() -> None:
     parser.add_argument("--allow-cpu", action="store_true", help="Cho phép chạy trên CPU (không khuyến nghị cho model thật).")
     parser.add_argument("--model-id", type=str, default=None, help="Chạy trực tiếp 1 model Hugging Face (ví dụ: Qwen/Qwen2.5-3B-Instruct).")
     parser.add_argument("--candidate", type=str, default=None, help="Chỉ chạy 1 ứng viên cụ thể trong danh sách theo tên.")
-    parser.add_argument("--thinking", action=argparse.BooleanOptionalAction, default=None, help="Bật/tắt thinking mode.")
+    parser.add_argument("--thinking", action="store_true", default=False, help="Bật thinking mode.")
+    parser.add_argument("--no-thinking", action="store_true", default=False, help="Tắt thinking mode.")
     parser.add_argument("--input-mode", type=str, default="all", choices=["all", "oracle", "asr"], help="Chế độ input đánh giá.")
 
     args = parser.parse_args()
@@ -612,7 +613,12 @@ def main() -> None:
 
     custom_cands = None
     if args.model_id:
-        think = args.thinking if args.thinking is not None else True
+        think = True
+        if args.no_thinking:
+            think = False
+        elif args.thinking:
+            think = True
+
         custom_cands = [
             CandidateConfig(
                 name=f"{args.model_id} ({'Thinking' if think else 'No Thinking'})",
