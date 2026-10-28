@@ -29,6 +29,19 @@ import numpy as np
 import soundfile as sf
 import torch
 from peft import LoraConfig, get_peft_model
+
+# Tự động vá tương thích: ngăn peft crash khi môi trường (như Google Colab) cài sẵn torchao cũ (<0.16.0)
+try:
+    import peft.import_utils
+    import peft.tuners.lora.torchao
+
+    def _safe_is_torchao_available() -> bool:
+        return False
+
+    peft.import_utils.is_torchao_available = _safe_is_torchao_available
+    peft.tuners.lora.torchao.is_torchao_available = _safe_is_torchao_available
+except (ImportError, AttributeError):
+    pass
 from torch.utils.data import Dataset
 from transformers import (
     Seq2SeqTrainer,
