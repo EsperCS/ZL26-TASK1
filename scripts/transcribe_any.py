@@ -162,6 +162,7 @@ def transcribe_long_file(
     audio_path: Path,
     chunk_duration_sec: float = 30.0,
     output_md_path: Path | None = None,
+    capu_mode_desc: str = "XLM-RoBERTa Capu",
 ) -> str:
     """
     Chuyển đổi file âm thanh (ngắn hoặc dài) thành văn bản Markdown chuyên nghiệp kèm timestamps.
@@ -172,7 +173,9 @@ def transcribe_long_file(
     print(f"{'=' * 60}")
 
     samples, sr, duration = load_and_convert_audio(audio_path)
-    print(f"📊 Thông tin file: {format_timestamp(duration)} ({duration:.1f}s) | 16000 Hz Mono")
+    print(
+        f"📊 Thông tin file: {format_timestamp(duration)} ({duration:.1f}s) | 16000 Hz Mono"
+    )
 
     chunk_size = int(chunk_duration_sec * sr)
     total_samples = len(samples)
@@ -187,7 +190,9 @@ def transcribe_long_file(
     else:
         # Nếu file dài, chia thành các khối 30s
         num_chunks = int(np.ceil(total_samples / chunk_size))
-        print(f"\n🎙️ File dài {format_timestamp(duration)}, tự động chia thành {num_chunks} đoạn để nhận dạng...")
+        print(
+            f"\n🎙️ File dài {format_timestamp(duration)}, tự động chia thành {num_chunks} đoạn để nhận dạng..."
+        )
 
         for i in range(num_chunks):
             start_idx = i * chunk_size
@@ -202,9 +207,13 @@ def transcribe_long_file(
 
             if text:
                 paragraphs.append((t_start, t_end, text))
-                print(f"  [{format_timestamp(t_start)} - {format_timestamp(t_end)}] {text}")
+                print(
+                    f"  [{format_timestamp(t_start)} - {format_timestamp(t_end)}] {text}"
+                )
             else:
-                print(f"  [{format_timestamp(t_start)} - {format_timestamp(t_end)}] (khoảng lặng)")
+                print(
+                    f"  [{format_timestamp(t_start)} - {format_timestamp(t_end)}] (khoảng lặng)"
+                )
 
     total_proc_time = time.perf_counter() - start_total_time
     rtf = total_proc_time / max(duration, 0.001)
@@ -222,7 +231,7 @@ def transcribe_long_file(
 > **Thời lượng file:** {format_timestamp(duration)} ({duration:.1f} giây)  
 > **Tổng số từ:** {total_words:,} từ  
 > **Thời gian xử lý:** {total_proc_time:.1f} giây (Tốc độ RTF: {rtf:.4f}x - Nhanh gấp {1/max(rtf, 1e-4):.1f} lần thời gian thực)  
-> **Mô hình sử dụng:** ZipFormer-150M + Hotwords + XLM-RoBERTa Capu + Vietnamese ITN  
+> **Mô hình sử dụng:** ZipFormer-150M + Hotwords + {capu_mode_desc} + Vietnamese ITN  
 
 ---
 
@@ -294,9 +303,52 @@ def main() -> None:
     hotwords_file = models_dir / "zalo_hotwords.txt"
     capu_ft_dir = models_dir / "xlm-roberta-capu-zalo-ft"
     capu_base_dir = models_dir / "xlm-roberta-capu"
-    capu_dir = capu_ft_dir if capu_ft_dir.exists() else capu_base_dir
+    drive_backup_capu = Path("/content/drive/MyDrive/zaloai_asr_backup/xlm-roberta-capu-zalo-ft")
+
+    # Tự động nạp bản fine-tuned từ Drive nếu phiên Colab bị khởi động lại
+    if (
+        not (capu_ft_dir / "pytorch_model.bin").exists()
+        and (drive_backup_capu / "pytorch_model.bin").exists()
+    ):
+        print(f"[RESTORE] Phát hiện Capu Fine-Tuned trên Google Drive! Đang khôi phục từ {drive_backup_capu}...")
+        import shutil
+
+        shutil.copytree(drive_backup_capu, capu_ft_dir, dirs_exist_ok=True)
+
+    has_ft_weights = (
+        (capu_ft_dir / "pytorch_model.bin").exists()
+        or (capu_ft_dir / "model.safetensors").exists()
+    )
+    has_base_weights = (
+        (capu_base_dir / "pytorch_model.bin").exists()
+        or (capu_base_dir / "model.safetensors").exists()
+    )
+
+    if has_ft_weights:
+        capu_dir = capu_ft_dir
+        capu_mode = "XLM-RoBERTa Capu (Zalo Fine-Tuned) 🚀"
+    elif has_base_weights:
+        capu_dir = capu_base_dir
+        capu_mode = "XLM-RoBERTa Capu (Pretrained Base)"
+    else:
+        print("[AUTO-DOWNLOAD] Chưa có sẵn Capu, đang tải dragonSwing/xlm-roberta-capu...")
+        try:
+            from huggingface_hub import snapshot_download
+
+            snapshot_download(
+                repo_id="dragonSwing/xlm-roberta-capu",
+                local_dir=str(capu_base_dir),
+                resume_download=True,
+            )
+            capu_dir = capu_base_dir
+            capu_mode = "XLM-RoBERTa Capu (Pretrained Base - Auto-Downloaded)"
+        except Exception as e:  # noqa: BLE001
+            print(f"[CẢNH BÁO] Không thể tải Capu ({e}). Tạm tắt tầng Capu.")
+            capu_dir = None
+            capu_mode = "Không sử dụng Capu"
 
     print(f"[KHỞI TẠO] Thiết bị giải mã: {args.device.upper()}")
+    print(f"[KHỞI TẠO] Mô hình Capu: {capu_mode}")
     print("[KHỞI TẠO] Đang nạp mô hình SherpaXLMPipeline...")
     pipeline = SherpaXLMPipeline(
         model_name_or_dir=zipformer_dir,
@@ -305,7 +357,7 @@ def main() -> None:
         vad_min_speech=0.25,
         hotwords_file=hotwords_file if hotwords_file.exists() else None,
         hotwords_score=1.5,
-        capu_model_dir=capu_dir if capu_dir.exists() else None,
+        capu_model_dir=capu_dir if capu_dir and capu_dir.exists() else None,
         device=args.device,
         provider=args.device,
     )
@@ -315,6 +367,7 @@ def main() -> None:
         audio_path=audio_path,
         chunk_duration_sec=args.chunk_duration,
         output_md_path=args.output,
+        capu_mode_desc=capu_mode,
     )
 
 
