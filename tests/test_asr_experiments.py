@@ -15,6 +15,7 @@ Unit tests cho bộ kịch bản thí nghiệm Fine-tuning & Tuning ASR:
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -302,4 +303,61 @@ def test_get_optimal_training_config_a100_gpu() -> None:
         assert cfg["bf16"] is True
         assert cfg["tf32"] is True
         assert cfg["learning_rate"] == 2e-5
+
+
+def test_backup_and_restore_workflow() -> None:
+    """Kiểm tra quy trình sao lưu và khôi phục checkpoint của backup_to_drive.py."""
+    from scripts.backup_to_drive import (
+        backup_to_drive,
+        get_dir_size_mb,
+        restore_from_drive,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        models_dir = tmp_path / "models" / "asr"
+        logs_dir = tmp_path / "logs"
+        drive_dir = tmp_path / "google_drive" / "ZaloAI_2026_ASR"
+
+        models_dir.mkdir(parents=True)
+        logs_dir.mkdir(parents=True)
+
+        # Tạo file mẫu
+        hw_file = models_dir / "zalo_hotwords.txt"
+        hw_file.write_text("SẾP DŨNG\nĐÀ NẴNG\n", encoding="utf-8")
+
+        capu_dir = models_dir / "xlm-roberta-capu-zalo-ft"
+        capu_dir.mkdir()
+        (capu_dir / "config.json").write_text('{"vocab_size": 15}', encoding="utf-8")
+
+        log_file = logs_dir / "leaderboard.md"
+        log_file.write_text("# Leaderboard Test", encoding="utf-8")
+
+        assert get_dir_size_mb(hw_file) > 0.0
+
+        # Chạy backup
+        backup_to_drive(
+            drive_dir=drive_dir,
+            models_dir=models_dir,
+            logs_dir=logs_dir,
+            include_whisper=False,
+            create_zip=False,
+        )
+
+        assert (drive_dir / "zalo_hotwords.txt").exists()
+        assert (drive_dir / "xlm-roberta-capu-zalo-ft" / "config.json").exists()
+        assert (drive_dir / "logs" / "leaderboard.md").exists()
+
+        # Xóa models cục bộ và khôi phục
+        shutil.rmtree(models_dir)
+        models_dir.mkdir(parents=True)
+
+        restore_from_drive(
+            drive_dir=drive_dir,
+            models_dir=models_dir,
+            logs_dir=logs_dir,
+        )
+
+        assert (models_dir / "zalo_hotwords.txt").exists()
+        assert (models_dir / "xlm-roberta-capu-zalo-ft" / "config.json").exists()
 
