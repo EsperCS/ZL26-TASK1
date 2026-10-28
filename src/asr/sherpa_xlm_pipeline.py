@@ -30,7 +30,6 @@ from typing import Any, ClassVar
 import numpy as np
 import sherpa_onnx
 import soundfile as sf
-import torch
 
 # ============================================================================
 # TẦNG 4: VIETNAMESE INVERSE TEXT NORMALIZATION (ITN)
@@ -555,20 +554,53 @@ class SherpaXLMPipeline:
         """
         t0 = time.perf_counter()
 
-        # 1. Đọc audio
+        # 1. Đọc audio (hỗ trợ .wav, .m4a, .mp3, .flac, .ogg qua ffmpeg fallback)
         if isinstance(audio_input, (str, Path)):
             audio_path = Path(audio_input)
             if not audio_path.exists():
                 raise FileNotFoundError(f"Không tìm thấy file audio: {audio_path}")
-            samples, sr = sf.read(str(audio_path), dtype="float32")
+            try:
+                samples, sr = sf.read(str(audio_path), dtype="float32")
+            except Exception:  # noqa: BLE001
+                # Fallback qua ffmpeg để giải mã các định dạng m4a, mp3, ogg, aac...
+                import subprocess
+                import tempfile
+
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_f:
+                    tmp_wav = tmp_f.name
+                try:
+                    subprocess.run(
+                        [
+                            "ffmpeg",
+                            "-y",
+                            "-i",
+                            str(audio_path),
+                            "-ar",
+                            "16000",
+                            "-ac",
+                            "1",
+                            "-f",
+                            "wav",
+                            tmp_wav,
+                        ],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=True,
+                    )
+                    samples, sr = sf.read(tmp_wav, dtype="float32")
+                finally:
+                    Path(tmp_wav).unlink(missing_ok=True)
+
             if samples.ndim > 1:
                 samples = samples.mean(axis=1)  # Chuyển stereo -> mono
             if sr != 16000:
                 # Nếu sample rate khác 16kHz, resample
-                import torchaudio.transforms as T
-                resampler = T.Resample(orig_freq=sr, new_freq=16000)
-                tensor_samples = torch.from_numpy(samples).float().unsqueeze(0)
-                samples = resampler(tensor_samples).squeeze(0).numpy()
+                num_target = int(len(samples) * 16000 / sr)
+                samples = np.interp(
+                    np.linspace(0, len(samples), num_target, endpoint=False),
+                    np.arange(len(samples)),
+                    samples,
+                ).astype(np.float32)
                 sr = 16000
         else:
             samples = np.asarray(audio_input, dtype=np.float32)
