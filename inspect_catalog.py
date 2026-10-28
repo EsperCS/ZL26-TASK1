@@ -18,7 +18,7 @@ for app in cat["apps"]:
                 print(f"{t_name}.{p_name}: {p_spec['x-match']}")
 
 print(f"\nTotal x-match params: {len(x_match_params)}")
-print("Distinct param names with x-match:", sorted(set(k.split(".")[1] for k in x_match_params.keys())))
+print("Distinct param names with x-match:", sorted({k.split(".")[1] for k in x_match_params}))
 
 print("\n--- X-ONE-OF TOOLS ---")
 for app in cat["apps"]:
