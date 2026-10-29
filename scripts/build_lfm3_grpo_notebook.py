@@ -186,25 +186,125 @@ with open(catalog_json_path, encoding="utf-8") as f:
 print(f"✨ Số ứng dụng trong catalog: {len(tools_catalog.get('apps', []))}")""")
 
     # ==================== CELL 7: PROMPT & BALANCING ====================
-    add_markdown("""# 🛠️ Bước 4: Đóng Gói Prompt Ngữ Cảnh & Cân Bằng Mẫu
-Điểm tối ưu vượt bậc của chúng ta so với cookbook của Liquid AI:
-- Liquid AI nạp cả 108 công cụ (~8,000 tokens) vào mọi prompt.
-- **Trong LifeMate**: Mỗi câu lệnh chỉ cài đặt **4 đến 8 ứng dụng** (~15 tools). Ta chỉ đưa đúng schema của các app đã cài vào prompt, giúp độ dài prompt chỉ còn **~1,200 tokens (nhẹ gấp 6 lần!)**.
-- Áp dụng kỹ thuật **Cân Bằng Dữ Liệu (Class Balancing)** của Liquid AI: nhân đôi các mẫu `tool_calls: []` (out-of-scope / app chưa cài đặt) để mô hình không bị thiên lệch luôn gọi bừa một công cụ.""")
+    add_markdown("""# 🛠️ Bước 4: Xây Dựng Prompt Chuẩn (Build Prompts)
+Tương tự như cookbook của Liquid AI, System Prompt chứa luật vận hành và thông tin ngữ cảnh. Hàm `build_prompt` kết hợp System Prompt, Bảng lịch 21 ngày, Hồ sơ người dùng và schema các công cụ đã cài đặt để tạo ra chuỗi ChatML hoàn chỉnh cho LFM3.""")
+
+    add_code("""from datetime import datetime, timedelta
+from dateutil import parser as date_parser
+
+VI_WEEKDAYS = ["Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy", "Chủ Nhật"]
+
+def build_calendar_table(current_time_str: str) -> str:
+    try:
+        curr_dt = date_parser.isoparse(current_time_str)
+    except Exception:
+        curr_dt = datetime.now()
+    curr_date = curr_dt.date()
+    curr_weekday = curr_date.weekday()
+
+    lines = ["| Mốc thời gian tương đối | Thứ | Ngày (YYYY-MM-DD) |", "| :--- | :--- | :--- |"]
+    for offset in range(-7, 14):
+        target_date = curr_date + timedelta(days=offset)
+        target_weekday = VI_WEEKDAYS[target_date.weekday()]
+        iso_str = target_date.strftime("%Y-%m-%d")
+        if offset == 0:
+            rel = "**Hôm nay (current_time)**"
+        elif offset == 1:
+            rel = "Ngày mai"
+        elif offset == 2:
+            rel = "Ngày kia"
+        elif offset == -1:
+            rel = "Hôm qua"
+        else:
+            rel = f"{target_weekday} ({offset:+d} ngày)"
+        lines.append(f"| {rel} | {target_weekday} | `{iso_str}` |")
+    return "\\n".join(lines)
+
+def build_tools_schema(installed_apps: dict) -> list[dict]:
+    apps_catalog = {a["id"]: a for a in tools_catalog.get("apps", [])}
+    tools = []
+    # Luôn thêm tool hỏi thông tin thiếu
+    tools.append({
+        "type": "function",
+        "function": {
+            "name": "sys.ask_missing_info",
+            "description": "Hỏi lại người dùng khi thiếu thông tin bắt buộc để thực hiện tác vụ.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tool_name": {"type": "string", "description": "Tên tool dự định gọi"},
+                    "params": {"type": "array", "items": {"type": "string"}, "description": "Danh sách tham số còn thiếu"},
+                },
+                "required": ["tool_name", "params"],
+            },
+        },
+    })
+    for app_id, app_info in installed_apps.items():
+        spec = apps_catalog.get(app_id)
+        if not spec:
+            continue
+        allowed = set(app_info.get("tools", []))
+        for t in spec.get("tools", []):
+            if t.get("name") in allowed:
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": t.get("name"),
+                        "description": t.get("description", ""),
+                        "parameters": t.get("parameters", {"type": "object", "properties": {}}),
+                    },
+                })
+    return tools
+
+SYSTEM_PROMPT = \"\"\"Bạn là LifeMate — trợ lý ảo điều hành công cụ thông minh trên điện thoại người dùng.
+Thời gian hiện tại: {current_time}. Địa chỉ nhà: {home_address}. Múi giờ: {timezone}.
+
+Quy tắc bắt buộc:
+- Gọi mọi công cụ (tools) cần thiết để hoàn thành yêu cầu của người dùng, lấy đối số từ câu nói và ngữ cảnh được cung cấp. Tuyệt đối không tự bịa ID hoặc thông tin không tồn tại.
+- Quy chiếu thời gian tương đối (\"hôm nay\", \"ngày mai\", \"chiều ni\", \"9 giờ sáng\", \"11 giờ đêm\") dựa vào thời gian hiện tại và bảng quy chiếu lịch.
+- Nếu yêu cầu thiếu tham số bắt buộc không thể tự tra cứu, hãy gọi công cụ sys.ask_missing_info với tên tool và danh sách tham số thiếu.
+- Nếu người dùng yêu cầu hành động thuộc ứng dụng CHƯA CÀI ĐẶT trên máy, xuất ra danh sách rỗng: không gọi công cụ nào.
+- Nếu người dùng đổi ý (\"làm A, à thôi B đi\"), chỉ thực hiện ý sau (B).
+- Với các tác vụ cần thông tin từ môi trường (ID thuốc, ID sự kiện, ID nhà hàng), hãy gọi công cụ đọc (list, search, get) trước.\"\"\"
+
+def build_prompt(example):
+    ctx = example.get("context", {})
+    curr_time = ctx.get("current_time", "2026-10-01T08:00:00+07:00")
+    home = ctx.get("home_address", {}).get("city", "Hà Nội")
+    tz = ctx.get("home_address", {}).get("timezone", "Asia/Ho_Chi_Minh")
+    
+    cal_table = build_calendar_table(curr_time)
+    profile = ctx.get("user_profile", {})
+    profile_str = json.dumps(profile, ensure_ascii=False) if profile else "Không có"
+    
+    system = SYSTEM_PROMPT.format(current_time=curr_time, home_address=home, timezone=tz)
+    system_full = f\"{system}\\n\\n### BẢNG QUY CHIẾU LỊCH 21 NGÀY:\\n{cal_table}\\n\\n### HỒ SƠ NGƯỜI DÙNG:\\n{profile_str}\"
+    
+    request_text = example.get("audio_text") or example.get("request", "")
+    messages = [
+        {"role": "system", "content": system_full},
+        {"role": "user", "content": request_text},
+    ]
+    
+    sample_tools = build_tools_schema(ctx.get("installed_apps", {}))
+    return tokenizer.apply_chat_template(
+        messages,
+        tools=sample_tools,
+        add_generation_prompt=True,
+        tokenize=False,
+        enable_thinking=False,
+    )
+
+prompt = build_prompt(raw_samples[0])
+print(f\"📏 Độ dài Prompt mẫu đầu tiên: {len(tokenizer(prompt, add_special_tokens=False).input_ids):,} tokens\")
+print(\"📄 1200 ký tự cuối của Prompt:\\n\")
+print(prompt[-1200:])""")
+
+    # ==================== CELL 8: DATASET PREPARATION & BALANCING ====================
+    add_markdown("""## ⚖️ Cân Bằng Dữ Liệu (Class Balancing)
+Áp dụng kỹ thuật cân bằng dữ liệu của Liquid AI: nhân đôi các mẫu `no_call` (yêu cầu ngoài phạm vi / chưa cài app) để mô hình không bị thiên lệch luôn luôn gọi bừa một công cụ.""")
 
     add_code("""from datasets import Dataset
-from src.agent.context_builder import ContextBuilder
-
-context_builder = ContextBuilder(tools_catalog=tools_catalog)
-
-raw_samples = []
-with open(train_jsonl_path, encoding="utf-8") as f:
-    for line in f:
-        line_str = line.strip()
-        if line_str:
-            raw_samples.append(json.loads(line_str))
-
-print(f"📊 Tổng số mẫu đọc được từ train.jsonl: {len(raw_samples)}")
 
 formatted_data = []
 no_call_count = 0
@@ -213,22 +313,7 @@ multi_call_count = 0
 for sample in raw_samples:
     s_id = sample.get("id", "")
     gold_calls = sample.get("label", {}).get("tool_calls", [])
-    installed_apps = sample.get("context", {}).get("installed_apps", {})
-    tools_schema = context_builder.build_tools_schema(installed_apps)
-    
-    # Xây dựng Messages ChatML kèm Bảng lịch 21 ngày và User Profile
-    messages = context_builder.build_messages(sample=sample, thinking_mode=False)
-    
-    try:
-        prompt_text = tokenizer.apply_chat_template(
-            messages,
-            tools=tools_schema if tools_schema else None,
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
-    except Exception:
-        prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    prompt_text = build_prompt(sample)
     
     is_no_call = len(gold_calls) == 0
     if is_no_call:
@@ -243,21 +328,18 @@ for sample in raw_samples:
         "is_no_call": is_no_call,
     })
 
+print(f"📊 Phân loại dữ liệu:")
 print(f"   - Mẫu không gọi tool (out-of-scope / clarify): {no_call_count} ({no_call_count/len(raw_samples):.1%})")
 print(f"   - Mẫu gọi nhiều tool (multi-calls): {multi_call_count} ({multi_call_count/len(raw_samples):.1%})")
 
-# CÂN BẰNG MẪU: Nhân đôi mẫu no_call để chống over-calling như Liquid AI khuyên dùng
+# CÂN BẰNG MẪU: Nhân đôi mẫu no_call
 balanced_data = list(formatted_data)
 for item in formatted_data:
     if item["is_no_call"]:
         balanced_data.append(item)
 
 train_dataset = Dataset.from_list(balanced_data).shuffle(seed=42)
-print(f"🚀 Kích thước tập huấn luyện sau cân bằng: {len(train_dataset)} mẫu")
-
-# Kiểm tra độ dài prompt
-sample_tokens = tokenizer(train_dataset[0]["prompt"], add_special_tokens=False).input_ids
-print(f"📏 Độ dài trung bình prompt: ~{len(sample_tokens):,} tokens (rất nhẹ, chạy siêu tốc trên A100!)")""")
+print(f"🚀 Kích thước tập huấn luyện sau cân bằng: {len(train_dataset)} mẫu")""")
 
     # ==================== CELL 8: REWARD FUNCTION ====================
     add_markdown("""# 🎯 Bước 5: Thiết Kế Hàm Thưởng Có Thể Kiểm Chứng (Verifiable Reward Function)
