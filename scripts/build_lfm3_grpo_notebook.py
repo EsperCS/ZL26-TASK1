@@ -367,13 +367,13 @@ print("✅ Hàm thưởng Verifiable Reward Function hoạt động chính xác 
 
     # ==================== CELL 9: LORA CONFIG ====================
     add_markdown("""# 🎛️ Bước 6: Cấu Hình PEFT LoRA Cho LFM3-1.7B
-Sử dụng chính xác bộ `target_modules` được khuyến nghị bởi Liquid AI, tăng rank $r=64$ và $\\alpha=128$ để tận dụng năng lực tính toán vượt trội của A100.""")
+Sử dụng chính xác cấu hình LoRA chuẩn của Liquid AI ($r=32, \\alpha=64$) trên các modules attention và gated convolution.""")
 
     add_code("""from peft import LoraConfig
 
 peft_config = LoraConfig(
-    r=64,             # Rank 64 cho năng lực biểu diễn phong phú
-    lora_alpha=128,   # Alpha = 2 * r
+    r=32,             # Cấu hình chuẩn của Liquid AI
+    lora_alpha=64,    # Alpha = 2 * r
     lora_dropout=0.0,
     target_modules=[
         "q_proj", "k_proj", "v_proj", "o_proj",   # Attention projections
@@ -385,32 +385,32 @@ peft_config = LoraConfig(
 )""")
 
     # ==================== CELL 10: GRPO TRAINING ARGS ====================
-    add_markdown("""# ⚡ Bước 7: Cấu Hình Siêu Tham Số GRPO Tối Đa Hóa Cho GPU A100
-Với GPU NVIDIA A100 (40GB/80GB VRAM) và độ dài prompt ~1,200 tokens:
-- **`generation_batch_size = 32`**: A100 sinh đồng thời 32 câu trả lời cùng lúc cực nhanh.
-- **`num_generations = 8`**: Mỗi câu hỏi sinh 8 phương án để so sánh và tính toán Relative Advantage trong GRPO.
-- **`per_device_train_batch_size = 4`**: Nâng cao thông lượng xử lý.
-- **`gradient_accumulation_steps = 8`**: Tương đương 32 câu hỏi (256 câu sinh) trên mỗi bước cập nhật trọng số!""")
+    add_markdown("""# ⚡ Bước 7: Cấu Hình Siêu Tham Số GRPO Chuẩn Liquid AI (Tránh OOM)
+Áp dụng chính xác siêu tham số chuẩn từ Cookbook chính thức của Liquid AI để đảm bảo tính ổn định và không bao giờ bị tràn bộ nhớ VRAM (OOM):
+- **`generation_batch_size = 8`**: Sinh từng nhóm 8 câu (đúng kích thước 1 group của 1 prompt), tránh quá tải bộ nhớ KV cache khi sinh.
+- **`per_device_train_batch_size = 2`**: Batch size an toàn, ổn định.
+- **`gradient_accumulation_steps = 16`**: Tích lũy 32 câu hỏi trên mỗi bước cập nhật trọng số.
+- **`max_completion_length = 256`**: Đủ chỗ cho lệnh tool call mà không tốn thừa token.""")
 
     add_code("""from trl import GRPOConfig, GRPOTrainer
 
 grpo_config = GRPOConfig(
     output_dir="./lfm3-lifemate-a100-checkpoints",
-    max_steps=200,                        # 200 optimization steps (~3-4 epochs)
-    per_device_train_batch_size=4,        # Batch size lớn trên A100
-    gradient_accumulation_steps=8,        # 4 * 8 = 32 requests/step (với 8 generations = 256 completions/step!)
+    max_steps=150,                        # 150 optimization steps chuẩn Liquid AI
+    per_device_train_batch_size=2,        # 2 requests mỗi micro-batch (chuẩn Liquid AI)
+    gradient_accumulation_steps=16,       # 2 * 16 = 32 answers mỗi step (chuẩn Liquid AI)
     num_generations=8,                    # 8 câu sinh cho mỗi prompt để so sánh tương quan (GRPO)
-    generation_batch_size=32,             # A100 sinh đồng thời 32 câu siêu tốc!
-    max_completion_length=384,            # Đủ chỗ cho XML tool calls và danh sách tham số phức tạp
-    temperature=1.0,                      # Độ đa dạng trong nhóm để tìm câu trả lời tối ưu
-    learning_rate=1.5e-5,
+    generation_batch_size=8,              # CỰC KỲ QUAN TRỌNG: Chỉ sinh 8 câu mỗi lượt để chống OOM tuyệt đối!
+    max_completion_length=256,            # 256 tokens chuẩn Liquid AI
+    temperature=1.0,                      # Độ đa dạng trong nhóm
+    learning_rate=1e-5,                   # LR chuẩn 1e-5
     beta=0.04,                            # KL penalty giữ mô hình không bị suy thoái ngôn ngữ
     lr_scheduler_type="constant_with_warmup",
-    warmup_steps=10,
+    warmup_steps=5,
     logging_steps=5,
-    save_strategy="steps",
-    save_steps=50,
-    bf16=True,                            # bfloat16 gốc trên Tensor Cores A100
+    save_strategy="no",                   # Tiết kiệm I/O đĩa
+    bf16=use_bf16,
+    fp16=not use_bf16,
     report_to="none",
 )
 
