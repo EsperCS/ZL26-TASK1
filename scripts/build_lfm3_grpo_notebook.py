@@ -78,10 +78,15 @@ DRIVE_DIR.mkdir(parents=True, exist_ok=True)
 print(f"📁 Thư mục checkpoint Drive: {DRIVE_DIR}")""")
 
     # ==================== CELL 3: INSTALL DEPENDENCIES ====================
-    add_markdown("""Cài đặt các gói cần thiết cho LFM3 + TRL GRPO (giữ nguyên PyTorch gốc của Colab để tương thích tối đa với phần cứng A100 và tránh xung đột với torchvision).""")
+    add_markdown("""Cài đặt các gói cần thiết cho LFM3 + TRL GRPO trên Colab.
+> [!TIP]
+> Chúng ta gỡ bỏ `torchvision` (thư viện đồ họa xử lý ảnh mà LFM3 không cần dùng tới) để tránh triệt để lỗi xung đột toán tử C++ `torchvision::nms` với PyTorch trên Colab.""")
 
-    add_code("""# Cài đặt các gói cần thiết cho LFM3 + TRL GRPO (giữ nguyên PyTorch gốc của Colab để tương thích 100% CUDA 13)
-!pip install -q "trl==1.16.0" "transformers>=5.20.0" "peft>=0.21.0" "accelerate>=1.15.0" "datasets>=5.0.0" "rapidfuzz>=3.14.0" "python-dateutil>=2.9.0" --progress-bar off""")
+    add_code("""# 1. Gỡ bỏ torchvision và cudf xung đột
+!pip uninstall -y torchvision cudf-cu13 cudf-polars-cu13 -q
+
+# 2. Cài đặt các gói chuẩn cho LFM3 + TRL GRPO
+!pip install -q "torch==2.14.1" "trl==1.16.0" "transformers>=5.21.0" "peft>=0.21.2" "accelerate>=1.15.0" "datasets>=5.1.0" "rapidfuzz>=3.14.0" "python-dateutil>=2.9.0" --progress-bar off""")
 
     # ==================== CELL 4: HARDWARE & A100 CHECK ====================
     add_markdown("""Kiểm tra phần cứng GPU NVIDIA A100 và độ chính xác tính toán `bfloat16`.""")
