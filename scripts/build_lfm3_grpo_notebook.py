@@ -78,9 +78,10 @@ DRIVE_DIR.mkdir(parents=True, exist_ok=True)
 print(f"📁 Thư mục checkpoint Drive: {DRIVE_DIR}")""")
 
     # ==================== CELL 3: INSTALL DEPENDENCIES ====================
-    add_markdown("""Cài đặt chính xác các phiên bản thư viện tương thích tối ưu cho LFM3 và TRL GRPO trên Colab.""")
+    add_markdown("""Cài đặt các gói cần thiết cho LFM3 + TRL GRPO (giữ nguyên PyTorch gốc của Colab để tương thích tối đa với phần cứng A100 và tránh xung đột với torchvision).""")
 
-    add_code("""!pip install -q "torch==2.14.1" "trl==1.16.0" "transformers>=5.21.0" "peft>=0.21.2" "accelerate>=1.15.0" "datasets>=5.1.0" "rapidfuzz>=3.14.0" "python-dateutil>=2.9.0" "polars>=1.38.0" "soundfile>=0.13.1" "safetensors>=0.6.0" --progress-bar off""")
+    add_code("""# Cài đặt các gói cần thiết cho LFM3 + TRL GRPO (giữ nguyên PyTorch gốc của Colab để tương thích 100% CUDA 13)
+!pip install -q "trl==1.16.0" "transformers>=5.20.0" "peft>=0.21.0" "accelerate>=1.15.0" "datasets>=5.0.0" "rapidfuzz>=3.14.0" "python-dateutil>=2.9.0" --progress-bar off""")
 
     # ==================== CELL 4: HARDWARE & A100 CHECK ====================
     add_markdown("""Kiểm tra phần cứng GPU NVIDIA A100 và độ chính xác tính toán `bfloat16`.""")
